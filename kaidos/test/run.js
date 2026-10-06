@@ -77,8 +77,8 @@ function ok(name, cond) { console.log((cond ? 'PASS' : 'FAIL') + '  ' + name); i
 // 6. call/ret
 (function () {
   K.loadCom(new Uint8Array([
-    0xE8, 0x03, 0x00,   // call +3 -> метка на ret
-    0x90,               // nop (после возврата)
+    0xE8, 0x02, 0x00,   // call rel16: next_ip=+3, disp=+2 -> цель = start+5 = C3 (ret)
+    0x90,               // nop (выполнится после возврата)
     0xF4,               // hlt
     0xC3                // ret (цель call)
   ]));

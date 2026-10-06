@@ -201,13 +201,15 @@
       case 0xF3: {                                       // rep prefix: stosb/stosw/movsb/cmovne
         var sub = fetchB();
         if (sub === 0xAA) {                             // rep stosb
+          var cnt = regs.cx & 0xFFFF;
           var a = la(regs.es, regs.di), v = regs.ax & 0xFF;
-          for (var i = 0; i < regs.cx; i++) wb(a + i, v);
-          markVga(a); regs.di = (regs.di + regs.cx) & 0xFFFF; regs.cx = 0;
+          for (var i = 0; i < cnt; i++) wb((a + i) & MEM_SIZE_MASK, v);
+          markVga(a); regs.di = (regs.di + cnt) & 0xFFFF; regs.cx = 0;
         } else if (sub === 0xAB) {                      // rep stosw
+          var cnt2 = regs.cx & 0xFFFF;
           var a2 = la(regs.es, regs.di), v2 = regs.ax;
-          for (var j = 0; j < regs.cx; j++) ww(a2 + j * 2, v2);
-          markVga(a2); regs.di = (regs.di + regs.cx * 2) & 0xFFFF; regs.cx = 0;
+          for (var j = 0; j < cnt2; j++) ww((a2 + j * 2) & MEM_SIZE_MASK, v2);
+          markVga(a2); regs.di = (regs.di + cnt2 * 2) & 0xFFFF; regs.cx = 0;
         } else { running = false; halted = 'rep:' + sub.toString(16); }
         break; }
       case 0xE4: regs.ax = (regs.ax & 0xFF00) | fetchB(); break;  // in al,imm (заглушка: 0-порт)

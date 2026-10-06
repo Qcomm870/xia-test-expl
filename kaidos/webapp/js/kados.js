@@ -173,11 +173,10 @@
       case 0xEB: regs.ip = (regs.ip + (fetchB() << 24 >> 24)) & 0xFFFF; break; // jmp rel8
       case 0xE9: regs.ip = (regs.ip + (fetchW() << 16 >> 16)) & 0xFFFF; break; // jmp rel16
       case 0xE8: {                                                // call rel16
-        var d = fetchW() << 16 >> 16;                             // fetchW уже сдвинул IP за imm
-        var retAddr = (regs.ip + d) & 0xFFFF;                     // цель перехода
-        regs.ip = (regs.ip - d) & 0xFFFF;                         // временный IP = конец инструкции
-        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);   // адрес возврата
-        regs.ip = retAddr; break;                                 // прыжок к цели
+        var d = fetchW() << 16 >> 16;                             // fetchW уже сдвинул IP за imm (конец инстр.)
+        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);   // адрес возврата = конец инструкции
+        regs.ip = (regs.ip + d) & 0xFFFF;                         // цель = конец + disp
+        break;
       }
 
       case 0xC6: {                                               // mov r/m8, imm8
@@ -252,7 +251,7 @@
       // NOTE: A0-A3 в real mode — это mov reg/mov [imm16], СЕГМЕНТ = DS (не far!)
       // A0-A3: адрес = (disp16 | (seg<<16)) & 0xFFFFF — поддерживает far-адрес вида A000:0000
       case 0xA3: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; ww(a, regs.ax); markVga(a); break; } // mov [m16],ax
-      case 0xA2: { var off = fetchW(); var moffs = fetchW(); var a = la(moffs, off); wb(a, regs.ax & 0xFF); markVga(a); break; } // mov moffs8,al (far-адрес из кода)
+      case 0xA2: { var off16 = fetchW(); var hi = fetchB(); fetchB(); var a = (hi === 0x0A ? 0xA0000 : (hi << 4)) + off16; wb(a & MEM_SIZE_MASK, regs.ax & 0xFF); markVga(a & MEM_SIZE_MASK); break; } // mov [moffs8],al: off16+hi-байт сегмента, 4-й байт проглатываем
       case 0xA0: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; setR8(0, rb(a)); break; } // mov al,[m16]
       case 0xA1: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; regs.ax = rw(a); break; } // mov ax,[m16]
       case 0xAA: { var a = la(regs.es, regs.di); wb(a, regs.ax & 0xFF); markVga(a); regs.di = (regs.di + 1) & 0xFFFF; break; } // stosb

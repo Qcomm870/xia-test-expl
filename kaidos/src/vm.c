@@ -27,10 +27,10 @@ void vm_step(void){
         case 0x90: r.ip++; break;                     /* NOP */
         case 0xEB: r.ip += 2 + (int8_t)mem[(p+1)&(MEM_SIZE-1)]; break; /* jmp short */
         case 0xE9: { int16_t d=*(int16_t*)&mem[(p+1)&(MEM_SIZE-1)]; r.ip+=3+d; } break;
-        case 0xB0 ... 0xB7: {                          /* mov r8, imm8 */
+        if(op>=0xB0 && op<=0xB7){                          /* mov r8, imm8 */
             uint8_t v = mem[(p+1)&(MEM_SIZE-1)];
             uint16_t *reg = (uint16_t*)&r;             /* грубо: AL..BH через ax..di */
-            ((uint8_t*)reg)[op-0xB0] = v; r.ip+=2; } break;
+            ((uint8_t*)reg)[op-0xB0] = v; r.ip+=2; break;}
         case 0xCD: {                                   /* INT n */
             uint8_t n = mem[(p+1)&(MEM_SIZE-1)]; r.ip+=2;
             extern void dos_int(uint8_t num, struct regs *R);

@@ -37,7 +37,8 @@
     regs.cs = regs.ds = regs.es = regs.ss = 0;
     regs.ip = 0x100; regs.sp = 0xFFFE; regs.flags = 0x0202;
     regs.ax = regs.bx = regs.cx = regs.dx = 0;
-    halted = null; running = true; consoleBuf = ''; vgaDirty = false;
+    ww(0, 0x00CD);              // пиратский инт-вектор 0 -> ret-ish stub
+    halted = false; running = true; consoleBuf = '';
   }
 
   /* ---------- прерывания ---------- */
@@ -65,7 +66,7 @@
     var f = regs.ah;
     if (f === 0 || f === 1) {
       var has = f === 0 ? true : keyQueue.length > 0;
-      if (f === 1 && !has) { regs.flags = (regs.flags & ~0x40) | 0x40; return; }
+      if (f === 1 && !has) { regs.zx = 0; regs.flags = (regs.flags & ~0x40) | 0x40; return; }
       var k = keyQueue.shift();
       if (k === undefined) { halted = 'key'; return; }
       regs.ax = k < 0x100 ? k : ((k >> 8) << 8 | (k & 0xFF));
@@ -102,7 +103,7 @@
     regs[full] = (regs[full] & (r & 1 ? 0x00FF : 0xFF00)) | ((v & 0xFF) << ((r & 1) * 8));
   }
 
-  function step(prevIp, n) {
+  function step() {
     if (!running) return false;
     var op = fetchB();
     switch (op) {
@@ -112,7 +113,7 @@
       case 0xE8: {                                                // call rel16
         var d = fetchW() << 16 >> 16;
         regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);
-        regs.ip = (regs.ip + d - 3) & 0xFFFF; break; }            // цель = IP до call + d
+        regs.ip = (regs.ip + d) & 0xFFFF; break; }
       case 0xC3: regs.ip = rw(la(regs.ss, regs.sp)); regs.sp = (regs.sp + 2) & 0xFFFF; break; // ret
       case 0xCD: {
         var n = fetchB();
@@ -198,14 +199,9 @@
     while (running && n < budget) {
       if (halted === 'key') {                        // VM ждёт ввода из JS
         if (!keyQueue.length) break;                 // ничего нет — выходим, не крутим CPU
-        halted = null;                               // клавиша пришла: повторим int, он заберёт её сам
-        regs.ip = (regs.ip - 2) & 0xFFFF;            // откат IP на CD xx (прерывание ещё нужно выполнить)
+        halted = null;                               // клавиша пришла: int21 заберёт её сам
       }
-      var prevIp = regs.ip;
-      step(prevIp, n); n++;
-      if (halted === 'selfloop') break;              // tight-петля: отдаём управление UI (main.js продолжит slice)
-      // страховка: IP вернулся туда же и цикл без прерываний — тоже считаем плотной петлёй
-      if (n > 1 && halted === null && regs.ip === prevIp) { halted = 'selfloop'; break; }
+      step(); n++;
     }
     return { running: running, halted: halted, steps: n };
   }

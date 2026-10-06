@@ -1,0 +1,13 @@
+{
+  "name": "KaDOS prototype",
+  "description": "Non-functional DOS emulator skeleton for KaiOS",
+  "launch_path": "/index.html",
+  "type": "privileged",
+  "version": "0.0.1",
+  "developer": { "name": "experiment", "url": "" },
+  "default_locale": "en",
+  "locales": { "en": { "name": "KaDOS", "description": "skeleton" } },
+  "permissions": {},
+  "fullscreen": true,
+  "orientation": ["landscape"]
+}

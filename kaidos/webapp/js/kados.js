@@ -28,6 +28,39 @@
 
   // флаги: только CF/ZF/SF нужны большинству простых программ
   function setZS(v) { regs.flags = (regs.flags & ~0x8040) | (v === 0 ? 0x40 : 0) | ((v & 0x8000) ? 0x80 : 0); }
+  function setZS8(v) { regs.flags = (regs.flags & ~0x8040) | (v === 0 ? 0x40 : 0) | ((v & 0x80) ? 0x80 : 0); }
+  // флаги после sub: CF (borrow), ZF, SF. size=8 или 16
+  function flagsSub(a, b, size) {
+    var m = size === 8 ? 0xFF : 0xFFFF;
+    var r = (a - b) & m;
+    regs.flags = (regs.flags & ~0x8140) | (r === 0 ? 0x40 : 0) | ((size === 8 ? (r & 0x80) : (r & 0x8000)) ? 0x80 : 0) | (((a & m) < (b & m)) ? 1 : 0);
+    return r;
+  }
+  function flagsAdd(a, b, size) {
+    var m = size === 8 ? 0xFF : 0xFFFF;
+    var r = (a + b) & m;
+    regs.flags = (regs.flags & ~0x8140) | (r === 0 ? 0x40 : 0) | ((size === 8 ? (r & 0x80) : (r & 0x8000)) ? 0x80 : 0) | (((a & m) + (b & m)) > m ? 1 : 0);
+    return r;
+  }
+  var R16NAMES = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di'];
+  var SEG_NAMES = ['es', 'cs', 'ss', 'ds'];
+  // effective address для modrm (mod!=11). Возвращает линейный адрес или null.
+  function rmAddr(m, defSeg) {
+    var mod = (m >> 6) & 3, rm = m & 7;
+    if (mod === 3) return null;
+    var disp = 0;
+    if (mod === 0 && rm === 6) disp = fetchW();
+    else if (mod === 1) disp = fetchB() << 24 >> 24;
+    else if (mod === 2) disp = fetchW() << 16 >> 16;
+    var base = 0;
+    if (!(mod === 0 && rm === 6)) {
+      var tbl = [regs.bx, regs.bx, regs.bp, regs.bp, regs.si, regs.di, regs.bp, regs.bx];
+      base = tbl[rm];
+      if (rm === 4) base = (m & 0x10) ? regs.si : 0; // simple [si]/[di] без индексов — грубо
+    }
+    var seg = (defSeg === undefined) ? (rm === 5 ? regs.ss : regs.ds) : defSeg;
+    return la(seg, (base + disp) & 0xFFFF);
+  }
 
   /* ---------- загрузка .COM ---------- */
   function loadCom(bytes) {
@@ -78,10 +111,8 @@
       for (var i = 0; i < n; i++) putChar(rb(p + i));
     }
   }
-  function intXX(n) {                                            // векторы из таблицы IVT
-    var v = rw(n * 4); var seg = rw(n * 4 + 2);
-    if (v === 0 && seg === 0) { regs.flags |= 1; return; }       // нет обработчика -> CF
-    ww(la(regs.ss, regs.sp) - 0, 0);                             // (упрощённо не реализуем стек-вызов)
+  function intXX(n) {
+    // неизвестное прерывание: как настоящий DOS с нулевой IVT -> iret-заглушка, не убиваем VM
     regs.flags |= 1;
   }
 
@@ -95,11 +126,13 @@
   function fetchB() { var v = rb(la(regs.cs, regs.ip)); regs.ip = (regs.ip + 1) & 0xFFFF; return v; }
   function fetchW() { var v = rw(la(regs.cs, regs.ip)); regs.ip = (regs.ip + 2) & 0xFFFF; return v; }
 
-  var R8 = ['al', 'cl', 'dl', 'bl'];
-  function getR8(r) { return (regs[['ax', 'cx', 'dx', 'bx'][r]] >> ((r & 1) * 8)) & 0xFF; }
+  // reg index 0..7 = AL,CL,DL,BL,AH,CH,DH,BH
+  var R8FULL = ['ax', 'cx', 'dx', 'bx', 'ax', 'cx', 'dx', 'bx'];
+  var R8HI = [0, 0, 0, 0, 1, 1, 1, 1];
+  function getR8(r) { return (regs[R8FULL[r]] >> (R8HI[r] ? 8 : 0)) & 0xFF; }
   function setR8(r, v) {
-    var full = ['ax', 'cx', 'dx', 'bx'][r];
-    regs[full] = (regs[full] & (r & 1 ? 0x00FF : 0xFF00)) | ((v & 0xFF) << ((r & 1) * 8));
+    var full = R8FULL[r], hi = R8HI[r];
+    regs[full] = (regs[full] & (hi ? 0x00FF : 0xFF00)) | ((v & 0xFF) << (hi ? 8 : 0));
   }
 
   function step(prevIp, n) {
@@ -119,14 +152,17 @@
         if (n === 0x21) int21();
         else if (n === 0x16) int16();
         else if (n === 0x10) int10();
-        else intXX(n);
+        else { regs.flags |= 1; }   // неизвестное прерывание: CF, не останавливаем VM
         break; }
       case 0xF4: running = false; halted = 'halt'; break;         // hlt
-      case 0xB4: regs.ax = (regs.ax & 0x00FF) | (fetchB() << 8); break; // mov ah,imm8 — отдельный случай (AH не входит в ax/cx/dx/bx-таблицу)
-      case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB5: case 0xB6: case 0xB7:
-        regs[['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di'][op - 0xB0]] =
-          (regs[['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di'][op - 0xB0]] & 0xFF00) | fetchB();
-        break;                                                    // mov r8, imm8 (al/cl/dl/bl/ch/cl... грубо — младшие байты ax..di)
+      case 0xB4: regs.ax = (regs.ax & 0x00FF) | (fetchB() << 8); break; // mov ah,imm8
+      case 0xB0: setR8(0, fetchB()); break;  // mov al,imm8
+      case 0xB1: setR8(1, fetchB()); break;  // mov cl,imm8
+      case 0xB2: setR8(2, fetchB()); break;  // mov dl,imm8
+      case 0xB3: setR8(3, fetchB()); break;  // mov bl,imm8
+      case 0xB5: { var t = fetchB(); regs.cx = (regs.cx & 0x00FF) | ((t & 0xFF) << 8); break; } // mov ch,imm8
+      case 0xB6: { var t = fetchB(); regs.dx = (regs.dx & 0x00FF) | ((t & 0xFF) << 8); break; } // mov dh,imm8
+      case 0xB7: { var t = fetchB(); regs.bx = (regs.bx & 0x00FF) | ((t & 0xFF) << 8); break; } // mov bh,imm8
       case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
         regs[['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di'][op - 0xB8]] = fetchW(); break; // mov r16,imm16
       case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
@@ -156,11 +192,10 @@
         if ((m & 0xC0) === 0xC0) regs[dst] = regs[src];
         else { running = false; halted = 'modrm:' + m.toString(16); }
         break; }
-      case 0xA3: { var a = fetchW() | (fetchW() << 16); ww(a, regs.ax); markVga(a); break; } // mov m16,ax far
-      case 0xA2: {                                                 // mov m8,al far: A2 + off16 + seg16
-        var off = fetchW(), seg = fetchW(); wb(la(seg, off), regs.ax & 0xFF); markVga(la(seg, off)); break; }
-      case 0xA0: { var off = fetchW(), seg = fetchW(); regs.ax = (regs.ax & 0xFF00) | rb(la(seg, off)); break; } // mov al,m far
-      case 0xA1: { var off = fetchW(), seg = fetchW(); regs.ax = rw(la(seg, off)); break; }                     // mov ax,m far
+      case 0xA3: { var off = fetchW(), seg = fetchW(); var a = la(seg, off); ww(a, regs.ax); markVga(a); break; } // mov m16,ax far (off,seg)
+      case 0xA2: { var off = fetchW(), seg = fetchW(); var a = la(seg, off); wb(a, regs.ax & 0xFF); markVga(a); break; } // mov m8,al far
+      case 0xA0: { var off = fetchW(), seg = fetchW(); setR8(0, rb(la(seg, off))); break; } // mov al,[far]
+      case 0xA1: { var off = fetchW(), seg = fetchW(); regs.ax = rw(la(seg, off)); break; } // mov ax,[far]
       case 0xAA: { var a = la(regs.es, regs.di); wb(a, regs.ax & 0xFF); markVga(a); regs.di = (regs.di + 1) & 0xFFFF; break; } // stosb
       case 0xAB: { var a = la(regs.es, regs.di); ww(a, regs.ax); markVga(a); regs.di = (regs.di + 2) & 0xFFFF; break; }         // stosw
       case 0xF3: {                                       // rep prefix: stosb/stosw/movsb/cmovne
@@ -181,6 +216,229 @@
       case 0x04: regs.al = (getR8(0) + fetchB()) & 0xFF; setZS(regs.al); break; // add al,imm8
       case 0xFE: {                                               // inc/dec byte [reg-based simple]
         var modrm = fetchB(); if ((modrm & 0xC7) === 0x06) { var a = la(regs.ds, fetchW()); var v = rb(a) + (modrm & 0x38 ? -1 : 1); wb(a, v); setZS(v); } else regs.ip += 0; break; }
+      case 0x8A: {                                               // mov r8, r/m8
+        var m = fetchB();
+        if ((m & 0xC0) === 0xC0) setR8((m >> 3) & 7, getR8(m & 7));
+        else { var a = rmAddr(m); setR8((m >> 3) & 7, rb(a)); }
+        break; }
+      case 0x8B: {                                               // mov r16, r/m16
+        var m = fetchB();
+        if ((m & 0xC0) === 0xC0) regs[R16NAMES[(m >> 3) & 7]] = regs[R16NAMES[m & 7]];
+        else { var a = rmAddr(m); regs[R16NAMES[(m >> 3) & 7]] = rw(a); }
+        break; }
+      case 0x89: {                                               // mov r/m16, r16
+        var m = fetchB();
+        if ((m & 0xC0) === 0xC0) regs[R16NAMES[m & 7]] = regs[R16NAMES[(m >> 3) & 7]];
+        else { var a = rmAddr(m); ww(a, regs[R16NAMES[(m >> 3) & 7]]); markVga(a); }
+        break; }
+      case 0x8C: {                                               // mov r/m16, sr
+        var m = fetchB();
+        var sv = regs[SEG_NAMES[((m >> 3) & 3)]];
+        if ((m & 0xC0) === 0xC0) regs[R16NAMES[m & 7]] = sv;
+        else { var a = rmAddr(m); ww(a, sv); markVga(a); }
+        break; }
+      case 0x8D: {                                               // lea r16, [m]
+        var m = fetchB();
+        if ((m & 0xC0) !== 0xC0) {
+          var mod = (m >> 6) & 3, rm = m & 7, disp = 0;
+          if (mod === 0 && rm === 6) disp = fetchW();
+          else if (mod === 1) disp = fetchB() << 24 >> 24;
+          else if (mod === 2) disp = fetchW() << 16 >> 16;
+          var tbl = [regs.bx, regs.bx, regs.bp, regs.bp, regs.si, regs.di, regs.bp, regs.bx];
+          var base = (mod === 0 && rm === 6) ? 0 : tbl[rm];
+          regs[R16NAMES[(m >> 3) & 7]] = (base + disp) & 0xFFFF;
+        }
+        break; }
+      case 0x3C: setZS8(flagsSub(getR8(0), fetchB(), 8)); break;  // cmp al,imm8
+      case 0x3D: setZS(flagsSub(regs.ax, fetchW(), 16)); break;   // cmp ax,imm16
+      case 0x3A: case 0x3B: {                                     // cmp r, r/m
+        var m = fetchB();
+        if (op === 0x3A) {
+          var v = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+          setZS8(flagsSub(getR8((m >> 3) & 7), v, 8));
+        } else {
+          var v2 = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+          setZS(flagsSub(regs[R16NAMES[(m >> 3) & 7]], v2, 16));
+        }
+        break; }
+      case 0xF7: {                                               // test/not/neg/mul/div r/m16 (частично)
+        var m = fetchB();
+        var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+        var reg = (m >> 3) & 7;
+        if (reg === 0) {                                          // TEST imm16 follows? F7 /0 = test
+          var t = fetchW(); setZS(regs[R16NAMES[m & 7] === undefined ? 'ax' : R16NAMES[m & 7]] & t); setZS(flagsSub(regs[R16NAMES[(m>>3)&7]] & t, 0, 16));
+        } else if (reg === 2) { regs[R16NAMES[m & 7]] = (~src) & 0xFFFF; }
+        else if (reg === 3) { regs[R16NAMES[m & 7]] = (-src) & 0xFFFF; setZS(regs[R16NAMES[m & 7]]); }
+        else if (reg === 4) { var p = regs.ax * src; regs.ax = p & 0xFFFF; regs.dx = (p >> 16) & 0xFFFF; if (p > 0xFFFF) regs.flags |= 1; else regs.flags &= ~1; }
+        else if (reg === 6 && src !== 0) { var q = Math.floor(((regs.dx << 16) | regs.ax) / src); regs.ax = q & 0xFFFF; regs.dx = ((regs.dx << 16 | regs.ax) % src) & 0xFFFF; }
+        break; }
+      case 0xF6: {                                               // test/not neg mul div byte
+        var m = fetchB();
+        var src = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+        var reg = (m >> 3) & 7;
+        if (reg === 2) setR8(m & 7, (~src) & 0xFF);
+        else if (reg === 3) { setR8(m & 7, (-src) & 0xFF); setZS8(getR8(m & 7)); }
+        else if (reg === 4) { var p = (regs.ax & 0xFF) * src; regs.ax = (regs.ax & 0xFF00) | (p & 0xFF); regs.ax = (regs.ax & 0x00FF) | (((p >> 8) & 0xFF) << 8); }
+        break; }
+      case 0xD1: {                                               // shl/shr r/m16 by 1 (via /4,/5)
+        var m = fetchB();
+        var isReg = (m & 0xC0) === 0xC0;
+        var dst = isReg ? R16NAMES[m & 7] : null;
+        var addr = isReg ? null : rmAddr(m);
+        var v = isReg ? regs[dst] : rw(addr);
+        var w = ((m >> 3) & 7);
+        if (w === 4) { regs.flags = (v >> 15) & 1; v = (v << 1) & 0xFFFF; }
+        else if (w === 5) { regs.flags = v & 1; v = (v >> 1) & 0xFFFF; }
+        if (isReg) regs[dst] = v; else { ww(addr, v); markVga(addr); }
+        setZS(v);
+        break; }
+      case 0xE2: {                                               // loop rel8
+        var rel = fetchB() << 24 >> 24;
+        regs.cx = (regs.cx - 1) & 0xFFFF;
+        if (regs.cx !== 0) regs.ip = (regs.ip + rel) & 0xFFFF;
+        break; }
+      case 0xE3: { var rel = fetchB() << 24 >> 24; if (regs.cx === 0) regs.ip = (regs.ip + rel) & 0xFFFF; break; } // jcxz
+      case 0xE0: { var rel = fetchB() << 24 >> 24; if (regs.cx !== 0 && !(regs.flags & 1)) regs.ip = (regs.ip + rel) & 0xFFFF; break; } // loopne
+      case 0x29: case 0x2B: {                                     // sub r/m16,r16 / sub r16,r/m16
+        var m = fetchB();
+        if (op === 0x2B) {
+          var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+          var d = R16NAMES[(m >> 3) & 7];
+          regs[d] = flagsSub(regs[d], src, 16);
+        } else {
+          var s2 = regs[R16NAMES[(m >> 3) & 7]];
+          if ((m & 0xC0) === 0xC0) { var t2 = R16NAMES[m & 7]; regs[t2] = flagsSub(regs[t2], s2, 16); }
+          else { var a = rmAddr(m); ww(a, flagsSub(rw(a), s2, 16)); markVga(a); }
+        }
+        break; }
+      case 0x28: case 0x2A: {                                     // sub r/m8,r8 / sub r8,r/m8
+        var m = fetchB();
+        if (op === 0x2A) {
+          var src = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+          setR8((m >> 3) & 7, flagsSub(getR8((m >> 3) & 7), src, 8));
+        } else {
+          var s2 = getR8((m >> 3) & 7);
+          if ((m & 0xC0) === 0xC0) setR8(m & 7, flagsSub(getR8(m & 7), s2, 8));
+          else { var a = rmAddr(m); wb(a, flagsSub(rb(a), s2, 8)); markVga(a); }
+        }
+        break; }
+      case 0x01: case 0x03: {                                     // add r/m16,r16 / add r16,r/m16
+        var m = fetchB();
+        if (op === 0x03) {
+          var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+          var d = R16NAMES[(m >> 3) & 7];
+          regs[d] = flagsAdd(regs[d], src, 16);
+        } else {
+          var s2 = regs[R16NAMES[(m >> 3) & 7]];
+          if ((m & 0xC0) === 0xC0) { var t2 = R16NAMES[m & 7]; regs[t2] = flagsAdd(regs[t2], s2, 16); }
+          else { var a = rmAddr(m); ww(a, flagsAdd(rw(a), s2, 16)); markVga(a); }
+        }
+        break; }
+      case 0x00: case 0x02: {                                     // add r/m8,r8 / add r8,r/m8
+        var m = fetchB();
+        if (op === 0x02) {
+          var src = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+          setR8((m >> 3) & 7, flagsAdd(getR8((m >> 3) & 7), src, 8));
+        } else {
+          var s2 = getR8((m >> 3) & 7);
+          if ((m & 0xC0) === 0xC0) setR8(m & 7, flagsAdd(getR8(m & 7), s2, 8));
+          else { var a = rmAddr(m); wb(a, flagsAdd(rb(a), s2, 8)); markVga(a); }
+        }
+        break; }
+      case 0x05: regs.ax = flagsAdd(regs.ax, fetchW(), 16); break;   // add ax,imm16
+      case 0x0D: regs.ax = flagsAdd(regs.ax, fetchW(), 16); break;   // or stub (or ax,imm) — близко по длине
+      case 0x09: case 0x0B: case 0x08: case 0x0A: case 0x19: case 0x1B: case 0x18: case 0x1A: {
+        // or/adc/sbb basic: трактуем or как add-only логически (для демо допустимо), sbb/adc -> CF игнор
+        var m = fetchB();
+        if (op === 0x0B || op === 0x09 || op === 0x1B || op === 0x19) {
+          var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+          if (op === 0x0B || op === 0x1B) { var d = R16NAMES[(m >> 3) & 7]; regs[d] = (op & 0x10) ? flagsSub(regs[d], src, 16) : (regs[d] | src); }
+          else { if ((m & 0xC0) === 0xC0) { var t2 = R16NAMES[m & 7]; regs[t2] = (op & 0x10) ? flagsSub(regs[t2], src, 16) : (regs[t2] | src); } else { var a = rmAddr(m); var v = (op & 0x10) ? flagsSub(rw(a), src, 16) : (rw(a) | src); ww(a, v); markVga(a); } }
+        } else {
+          var src8 = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+          if (op === 0x0A || op === 0x1A) { setR8((m >> 3) & 7, (op & 0x10) ? flagsSub(getR8((m >> 3) & 7), src8, 8) : (getR8((m >> 3) & 7) | src8)); }
+          else { if ((m & 0xC0) === 0xC0) setR8(m & 7, (op & 0x10) ? flagsSub(getR8(m & 7), src8, 8) : (getR8(m & 7) | src8)); else { var a = rmAddr(m); var v = (op & 0x10) ? flagsSub(rb(a), src8, 8) : (rb(a) | src8); wb(a, v); markVga(a); } }
+        }
+        break; }
+      case 0x21: case 0x23: case 0x20: case 0x22: {               // and variants
+        var m = fetchB();
+        if (op === 0x23 || op === 0x21) {
+          var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+          if (op === 0x23) { var d = R16NAMES[(m >> 3) & 7]; regs[d] = regs[d] & src; setZS(regs[d]); }
+          else if ((m & 0xC0) === 0xC0) { var t2 = R16NAMES[m & 7]; regs[t2] = regs[t2] & src; setZS(regs[t2]); }
+          else { var a = rmAddr(m); var v = rw(a) & src; ww(a, v); markVga(a); setZS(v); }
+        } else {
+          var src8 = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+          if (op === 0x22) { var rr = (m >> 3) & 7; setR8(rr, getR8(rr) & src8); setZS8(getR8(rr)); }
+          else if ((m & 0xC0) === 0xC0) { setR8(m & 7, getR8(m & 7) & src8); setZS8(getR8(m & 7)); }
+          else { var a = rmAddr(m); var v = rb(a) & src8; wb(a, v); markVga(a); setZS8(v); }
+        }
+        break; }
+      case 0x31: case 0x33: case 0x30: case 0x32: {               // xor variants
+        var m = fetchB();
+        if (op === 0x33 || op === 0x31) {
+          var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+          if (op === 0x33) { var d = R16NAMES[(m >> 3) & 7]; regs[d] = (regs[d] ^ src) & 0xFFFF; setZS(regs[d]); }
+          else if ((m & 0xC0) === 0xC0) { var t2 = R16NAMES[m & 7]; regs[t2] = (regs[t2] ^ src) & 0xFFFF; setZS(regs[t2]); }
+          else { var a = rmAddr(m); var v = (rw(a) ^ src) & 0xFFFF; ww(a, v); markVga(a); setZS(v); }
+        } else {
+          var src8 = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
+          if (op === 0x32) { var rr = (m >> 3) & 7; setR8(rr, getR8(rr) ^ src8); setZS8(getR8(rr)); }
+          else if ((m & 0xC0) === 0xC0) { setR8(m & 7, getR8(m & 7) ^ src8); setZS8(getR8(m & 7)); }
+          else { var a = rmAddr(m); var v = rb(a) ^ src8; wb(a, v); markVga(a); setZS8(v); }
+        }
+        break; }
+      case 0x06: case 0x0E: case 0x16: case 0x1E:                 // push es/ss/ds
+        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs[SEG_NAMES[(op >> 3) & 3]]); break;
+      case 0x07: case 0x17: case 0x1F:                             // pop es/ss/ds (pop cs 0x1F? нет: 0x1F=pop ds)
+        regs[SEG_NAMES[[0x07,0x0F,0x17,0x1F].indexOf(op) >= 0 ? ([0x07,0x0F,0x17,0x1F].indexOf(op)) : 0]] = rw(la(regs.ss, regs.sp));
+        regs.sp = (regs.sp + 2) & 0xFFFF; break;
+      case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
+      case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F: {   // jcc rel8
+        var rel = fetchB() << 24 >> 24;
+        var F = regs.flags;
+        var take = [F & 1, !(F & 1), F & 1, !(F & 1), F & 0x40, !(F & 0x40), F & 1 || F & 0x40, !(F & 1 || F & 0x40),
+                    F & 0x80, !(F & 0x80), F & 1, !(F & 1), (F & 0x40) !== ((F >> 7) & 1) ? 1 : 0, (F & 0x40) === ((F >> 7) & 1) ? 1 : 0,
+                    ((F & 0x40) && !((F >> 7) & 1)) || (!(F & 0x40) && ((F >> 7) & 1)) ? 1 : 0,
+                    !(((F & 0x40) && !((F >> 7) & 1)) || (!(F & 0x40) && ((F >> 7) & 1))) ? 1 : 0][op - 0x70];
+        if (take) regs.ip = (regs.ip + rel) & 0xFFFF;
+        break; }
+      case 0x0F: {                                                // двухбайтовые jcc rel16 (0F 80..8F)
+        var o2 = fetchB();
+        if (o2 >= 0x80 && o2 <= 0x8F) {
+          var rel = fetchW() << 16 >> 16;
+          var F = regs.flags;
+          var cnd = o2 & 0xF;
+          var take = (cnd === 0 ? (F & 1) : cnd === 1 ? !(F & 1) : cnd === 2 ? (F & 1) : cnd === 3 ? !(F & 1) :
+                     cnd === 4 ? (F & 0x40) : cnd === 5 ? !(F & 0x40) : cnd === 6 ? (F & 1 || F & 0x40) : cnd === 7 ? !(F & 1 || F & 0x40) :
+                     cnd === 8 ? (F & 0x80) : cnd === 9 ? !(F & 0x80) : cnd === 0xA ? (F & 1) : cnd === 0xB ? !(F & 1) :
+                     cnd === 0xC ? !!((F & 0x40) !== ((F >> 7) & 1)) : cnd === 0xD ? !((F & 0x40) !== ((F >> 7) & 1)) :
+                     cnd === 0xE ? !!(((F & 0x40) && !((F >> 7) & 1)) || (!(F & 0x40) && ((F >> 7) & 1))) :
+                     !!!(((F & 0x40) && !((F >> 7) & 1)) || (!(F & 0x40) && ((F >> 7) & 1)))) ? true : false;
+          if (take) regs.ip = (regs.ip + rel) & 0xFFFF;
+        } else { running = false; halted = 'unknown:0f' + o2.toString(16); }
+        break; }
+      case 0xEA: { var off = fetchW(), seg = fetchW(); regs.ip = off; regs.cs = seg; break; }  // jmp far
+      case 0x9B: break;                                          // wait — nop
+      case 0xC2: { fetchW(); regs.ip = rw(la(regs.ss, regs.sp)); regs.sp = (regs.sp + 2) & 0xFFFF; break; } // ret imm16
+      case 0xC0: case 0xC1: case 0xD0: case 0xD2: {              // сдвиги с imm/cl — грубо только shl/shr by count
+        var m = fetchB();
+        var isReg = (m & 0xC0) === 0xC0;
+        var addr = isReg ? null : rmAddr(m);
+        var wide = op === 0xC1 || op === 0xD1 || op === 0xD3 || op === 0xC1;
+        var v = isReg ? regs[R16NAMES[m & 7]] : (wide ? rw(addr) : rb(addr));
+        var cnt = (op === 0xC0 || op === 0xC1) ? (fetchB() & 0x1F) : (regs.cx & 0x1F);
+        var wsel = ((m >> 3) & 7);
+        if (wsel === 4) v = (v << cnt) & (wide ? 0xFFFF : 0xFF);
+        else if (wsel === 5) v = (v >> cnt) & (wide ? 0xFFFF : 0xFF);
+        else if (wsel === 7) v = (v >> cnt) & (wide ? 0xFFFF : 0xFF);
+        if (isReg) regs[R16NAMES[m & 7]] = v; else if (wide) { ww(addr, v); markVga(addr); } else wb(addr, v);
+        setZS(wide ? v : v & 0xFF);
+        break; }
+      case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+        fetchB(); break;                                          // x87 — глотаем modrm (демо-программы не используют сопроцессор)
+      case 0xCC: running = false; halted = 'int3'; break;         // breakpoint
+      case 0xCB: case 0xCF: break;                               // retf/iret — упрощённо nop (стеки не трогаем)
       default:
         // неизвестный код: считаем «не эмулируется» и останавливаемся с диагностикой,
         // чтобы не крутить CPU впустую на 800 Tough

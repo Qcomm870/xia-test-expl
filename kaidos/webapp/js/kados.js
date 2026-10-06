@@ -19,8 +19,14 @@
   var vgaDirty = false;        // помечать при записи в A000
   var consoleBuf = '';         // вывод text-mode (INT 21h fn 09h/02h)
 
-  var MEM_SIZE_MASK = MEMSIZE - 1;
-  function la(seg, off) { return ((seg << 4) + off) & MEM_SIZE_MASK; }
+  var MEM_SIZE_MASK = 0xFFFFF; // физическая маска 20-bit (1MB)
+  // 20-битная физическая адресация: (seg*16+off) mod 1MB.
+  // Поддержка «far-указателей» вида A000:0000: сегменты >=0x10000 мапим напрямую.
+  function la(seg, off) {
+    // спецкейс: «far-указатель» на VGA A000:xxxx трактуем как физический 0xA0000+off
+    if ((seg & 0xFFFF) === 0xA000) return 0xA0000 + (off & 0xFFFF);
+    return (((seg & 0xFFFF) << 4) + off) & 0xFFFFF;
+  }
   function rb(a) { return mem[a & MEM_SIZE_MASK]; }
   function rw(a) { return mem[a & MEM_SIZE_MASK] | (mem[(a + 1) & MEM_SIZE_MASK] << 8); }
   function wb(a, v) { mem[a & MEM_SIZE_MASK] = v & 0xFF; }
@@ -44,6 +50,20 @@
   }
   var R16NAMES = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di'];
   var SEG_NAMES = ['es', 'cs', 'ss', 'ds'];
+  // grp1 ALU-операция (add/or/adc/sbb/and/sub/xor/cmp) — общая для 0x80/0x81/0x83
+  function grpOp(wsel, a, b, size) {
+    switch (wsel) {
+      case 0: return flagsAdd(a, b, size);          // add
+      case 1: { var r = (a | b) & (size === 8 ? 0xFF : 0xFFFF); size === 8 ? setZS8(r) : setZS(r); return r; } // or
+      case 2: return flagsAdd(a, b, size);          // adc (CF входящая игнорируется — демо)
+      case 3: return flagsSub(a, b, size);          // sbb (CF входящая игнорируется)
+      case 4: { var r = (a & b) & (size === 8 ? 0xFF : 0xFFFF); size === 8 ? setZS8(r) : setZS(r); return r; } // and
+      case 5: return flagsSub(a, b, size);          // sub
+      case 6: { var r = (a ^ b) & (size === 8 ? 0xFF : 0xFFFF); size === 8 ? setZS8(r) : setZS(r); return r; } // xor
+      case 7: flagsSub(a, b, size); return a;       // cmp — только флаги
+    }
+    return a;
+  }
   // effective address для modrm (mod!=11). Возвращает линейный адрес или null.
   function rmAddr(m, defSeg) {
     var mod = (m >> 6) & 3, rm = m & 7;
@@ -56,7 +76,6 @@
     if (!(mod === 0 && rm === 6)) {
       var tbl = [regs.bx, regs.bx, regs.bp, regs.bp, regs.si, regs.di, regs.bp, regs.bx];
       base = tbl[rm];
-      if (rm === 4) base = (m & 0x10) ? regs.si : 0; // simple [si]/[di] без индексов — грубо
     }
     var seg = (defSeg === undefined) ? (rm === 5 ? regs.ss : regs.ds) : defSeg;
     return la(seg, (base + disp) & 0xFFFF);
@@ -86,7 +105,8 @@
         if (!keyQueue.length) { halted = 'key'; break; }         // выход в цикл событий JS
         var k = keyQueue.shift();                                // забираем клавишу
         pendingKey = k;
-        regs.ax = ((k & 0xFF) << 8) | (k & 0xFF); break; }       // AL=ASCII, AH=скан-код
+        var sc = scanQueue.length ? scanQueue.shift() : 0;
+        regs.ax = ((sc & 0xFF) << 8) | (k & 0xFF); break; }      // AL=ASCII, AH=скан-код
       case 0x0B: regs.ax = keyQueue.length ? 0xFF01 : 0x00; break; // check input
       case 0x4C: case 0x00: running = false; halted = 'exit'; break; // terminate
       case 0x44: regs.ax = 0x0080; break;                        // ioctl: char device
@@ -97,16 +117,25 @@
   function int16() {                                             // BIOS keyboard
     var f = regs.ah;
     if (f === 0 || f === 1) {
-      var has = f === 0 ? true : keyQueue.length > 0;
-      if (f === 1 && !has) { regs.flags = (regs.flags & ~0x40) | 0x40; return; }
+      if (f === 1 && !keyQueue.length) { regs.flags = (regs.flags & ~0x40) | 0x40; return; } // check: no key -> ZF
       var k = keyQueue.shift();
-      if (k === undefined) { halted = 'key'; return; }
+      if (k === undefined) { halted = 'key'; return; }                                       // wait: ждём из JS
       regs.ax = k < 0x100 ? k : ((k >> 8) << 8 | (k & 0xFF));
       regs.flags &= ~0x40;
     } else if (f === 2) { regs.ax = 0; }                         // shift states
   }
+  var vgaMode = 3;
   function int10() {
-    if (regs.ax === 0x13) {                                      // tty-like string out
+    var f = regs.ax >> 8;
+    if (f === 0x00) {                                             // set video mode
+      vgaMode = (regs.al === 0x13) ? 0x13 : 3;
+      if (vgaMode === 0x13) { mem.fill(0, 0xA0000, 0xA0000 + 64000); vgaDirty = true; }
+    } else if (f === 0x0C) {                                      // write pixel: ES:BP? нет — X=CX,Y=DH,DH... AL=color
+      if (vgaMode === 0x13) {
+        var x = regs.cx & 0xFF, y = regs.dx >> 8;
+        if (x < 320 && y < 200) { wb(0xA0000 + y * 320 + x, regs.ax & 0xFF); vgaDirty = true; }
+      }
+    } else if (regs.ax === 0x13) {                                // tty-like string out (legacy)
       var p = la(regs.es, regs.bp), n = regs.cx & 0xFFFF;
       for (var i = 0; i < n; i++) putChar(rb(p + i));
     }
@@ -143,9 +172,44 @@
       case 0xEB: regs.ip = (regs.ip + (fetchB() << 24 >> 24)) & 0xFFFF; break; // jmp rel8
       case 0xE9: regs.ip = (regs.ip + (fetchW() << 16 >> 16)) & 0xFFFF; break; // jmp rel16
       case 0xE8: {                                                // call rel16
-        var d = fetchW() << 16 >> 16;
-        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);
-        regs.ip = (regs.ip + d - 3) & 0xFFFF; break; }            // цель = IP до call + d
+        var d = fetchW() << 16 >> 16;                             // fetchW уже сдвинул IP за imm
+        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);   // return addr = IP после инструкции
+        regs.ip = (regs.ip + d) & 0xFFFF; break; }               // target = IP(конец инстр) + disp
+
+      case 0xC6: {                                               // mov r/m8, imm8
+        var m = fetchB(); var v8 = fetchB();
+        if ((m & 0xC0) === 0xC0) setR8(m & 7, v8);
+        else { var a = rmAddr(m); wb(a, v8); markVga(a); }
+        break; }
+      case 0xC7: {                                               // mov r/m16, imm16
+        var m = fetchB(); var v16 = fetchW();
+        if ((m & 0xC0) === 0xC0) regs[R16NAMES[m & 7]] = v16;
+        else { var a = rmAddr(m); ww(a, v16); markVga(a); }
+        break; }
+      case 0x81: {                                               // grp1 r/m16, imm16
+        var m = fetchB(); var wsel = (m >> 3) & 7; var imm = fetchW();
+        var isReg = (m & 0xC0) === 0xC0;
+        var dstA = isReg ? null : rmAddr(m);
+        var cur = isReg ? regs[R16NAMES[m & 7]] : rw(dstA);
+        var res = grpOp(wsel, cur, imm, 16);
+        if (wsel !== 7) { if (isReg) regs[R16NAMES[m & 7]] = res & 0xFFFF; else { ww(dstA, res); markVga(dstA); } }
+        break; }
+      case 0x83: {                                               // grp1 r/m16, imm8 (sign-extend)
+        var m = fetchB(); var wsel = (m >> 3) & 7; var imm = (fetchB() << 24 >> 24) & 0xFFFF;
+        var isReg = (m & 0xC0) === 0xC0;
+        var dstA = isReg ? null : rmAddr(m);
+        var cur = isReg ? regs[R16NAMES[m & 7]] : rw(dstA);
+        var res = grpOp(wsel, cur, imm, 16);
+        if (wsel !== 7) { if (isReg) regs[R16NAMES[m & 7]] = res & 0xFFFF; else { ww(dstA, res); markVga(dstA); } }
+        break; }
+      case 0x80: {                                               // grp1 r/m8, imm8
+        var m = fetchB(); var wsel = (m >> 3) & 7; var imm = fetchB();
+        var isReg = (m & 0xC0) === 0xC0;
+        var dstA = isReg ? null : rmAddr(m);
+        var cur = isReg ? getR8(m & 7) : rb(dstA);
+        var res = grpOp(wsel, cur, imm, 8);
+        if (wsel !== 7) { if (isReg) setR8(m & 7, res); else { wb(dstA, res); markVga(dstA); } }
+        break; }
       case 0xC3: regs.ip = rw(la(regs.ss, regs.sp)); regs.sp = (regs.sp + 2) & 0xFFFF; break; // ret
       case 0xCD: {
         var n = fetchB();
@@ -155,7 +219,7 @@
         else { regs.flags |= 1; }   // неизвестное прерывание: CF, не останавливаем VM
         break; }
       case 0xF4: running = false; halted = 'halt'; break;         // hlt
-      case 0xB4: regs.ax = (regs.ax & 0x00FF) | (fetchB() << 8); break; // mov ah,imm8
+      case 0xB4: setR8(4, fetchB()); break; // mov ah,imm8
       case 0xB0: setR8(0, fetchB()); break;  // mov al,imm8
       case 0xB1: setR8(1, fetchB()); break;  // mov cl,imm8
       case 0xB2: setR8(2, fetchB()); break;  // mov dl,imm8
@@ -172,30 +236,21 @@
       case 0x26: case 0x2E: case 0x36: case 0x3E: break;          // префиксы сегментов — игнор (flat)
       case 0x88: {                                               // mov r/m8, r8
         var m = fetchB();
-        if ((m & 0xC0) === 0x00 && (m & 0x07) === 0x06) {         // mod=00 rm=110 -> direct [disp16]
-          var a = la(regs.ds, fetchW()); wb(a, getR8((m >> 3) & 7)); markVga(a);
-        } else if ((m & 0xC0) === 0xC0) { setR8(m & 7, getR8((m >> 3) & 7)); }
-        else if ((m & 0xC0) === 0x00 && (m & 0x38) !== 0x30) {    // reg-direct memory: [bx][si][di][bp]+displ
-          var base = regs[['bx','bx','bp','bp','si','di','bp','bx'][(m & 7)]];
-          var disp = 0;
-          if ((m & 0xC0) === 0x40) disp = fetchB() << 24 >> 24;
-          else if ((m & 0xC0) === 0x80) disp = fetchW() << 16 >> 16;
-          var addr = la(regs.ds, (base + disp) & 0xFFFF);
-          wb(addr, getR8((m >> 3) & 7)); markVga(addr);
-        }
-        else { running = false; halted = 'modrm:' + m.toString(16); }
+        if ((m & 0xC0) === 0xC0) setR8(m & 7, getR8((m >> 3) & 7));
+        else { var a = rmAddr(m); wb(a, getR8((m >> 3) & 7)); markVga(a); }
         break; }
-      case 0x8E: {                                               // mov sr, r16 (modrm reg=seg)
+      case 0x8E: {                                               // mov sr, r/m16 (modrm reg=seg)
         var m = fetchB();
-        var src = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di'][(m >> 3) & 7];
-        var dst = ['es', 'cs', 'ss', 'ds'][m & 7];
-        if ((m & 0xC0) === 0xC0) regs[dst] = regs[src];
-        else { running = false; halted = 'modrm:' + m.toString(16); }
+        var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
+        var dst = SEG_NAMES[(m >> 3) & 3];                        // reg-поле = сегментный регистр
+        regs[dst] = src;
         break; }
-      case 0xA3: { var off = fetchW(), seg = fetchW(); var a = la(seg, off); ww(a, regs.ax); markVga(a); break; } // mov m16,ax far (off,seg)
-      case 0xA2: { var off = fetchW(), seg = fetchW(); var a = la(seg, off); wb(a, regs.ax & 0xFF); markVga(a); break; } // mov m8,al far
-      case 0xA0: { var off = fetchW(), seg = fetchW(); setR8(0, rb(la(seg, off))); break; } // mov al,[far]
-      case 0xA1: { var off = fetchW(), seg = fetchW(); regs.ax = rw(la(seg, off)); break; } // mov ax,[far]
+      // NOTE: A0-A3 в real mode — это mov reg/mov [imm16], СЕГМЕНТ = DS (не far!)
+      // A0-A3: адрес = (disp16 | (seg<<16)) & 0xFFFFF — поддерживает far-адрес вида A000:0000
+      case 0xA3: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; ww(a, regs.ax); markVga(a); break; } // mov [m16],ax
+      case 0xA2: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; wb(a, regs.ax & 0xFF); markVga(a); break; } // mov [m8],al
+      case 0xA0: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; setR8(0, rb(a)); break; } // mov al,[m16]
+      case 0xA1: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; regs.ax = rw(a); break; } // mov ax,[m16]
       case 0xAA: { var a = la(regs.es, regs.di); wb(a, regs.ax & 0xFF); markVga(a); regs.di = (regs.di + 1) & 0xFFFF; break; } // stosb
       case 0xAB: { var a = la(regs.es, regs.di); ww(a, regs.ax); markVga(a); regs.di = (regs.di + 2) & 0xFFFF; break; }         // stosw
       case 0xF3: {                                       // rep prefix: stosb/stosw/movsb/cmovne
@@ -214,10 +269,30 @@
         break; }
       case 0xE4: regs.ax = (regs.ax & 0xFF00) | fetchB(); break;  // in al,imm (заглушка: 0-порт)
       case 0xE6: fetchB(); break;                                 // out imm,al — проглатываем
-      case 0x2C: regs.al = (getR8(0) - fetchB()) & 0xFF; setZS(regs.al); break; // sub al,imm8
-      case 0x04: regs.al = (getR8(0) + fetchB()) & 0xFF; setZS(regs.al); break; // add al,imm8
-      case 0xFE: {                                               // inc/dec byte [reg-based simple]
-        var modrm = fetchB(); if ((modrm & 0xC7) === 0x06) { var a = la(regs.ds, fetchW()); var v = rb(a) + (modrm & 0x38 ? -1 : 1); wb(a, v); setZS(v); } else regs.ip += 0; break; }
+      case 0x2C: var t = flagsSub(getR8(0), fetchB(), 8); setR8(0, t); break; // sub al,imm8
+      case 0x04: var t = flagsAdd(getR8(0), fetchB(), 8); setR8(0, t); break; // add al,imm8
+      case 0xFE: {                                               // inc/dec r/m8 (полный modrm)
+        var modrm = fetchB();
+        var wsel = (modrm >> 3) & 7;
+        var isReg = (modrm & 0xC0) === 0xC0;
+        var addr = isReg ? null : rmAddr(modrm);
+        var v = isReg ? getR8(modrm & 7) : rb(addr);
+        v = wsel === 0 ? (v + 1) & 0xFF : (v - 1) & 0xFF;
+        setZS8(v);
+        if (isReg) setR8(modrm & 7, v); else { wb(addr, v); markVga(addr); }
+        break; }
+      case 0xFF: {                                               // inc/dec/call/jmp/push r/m16
+        var modrm = fetchB();
+        var wsel = (modrm >> 3) & 7;
+        var isReg = (modrm & 0xC0) === 0xC0;
+        var addr = isReg ? null : rmAddr(modrm);
+        var val = isReg ? regs[R16NAMES[modrm & 7]] : rw(addr);
+        if (wsel === 0) { val = (val + 1) & 0xFFFF; if (isReg) regs[R16NAMES[modrm & 7]] = val; else { ww(addr, val); markVga(addr); } }
+        else if (wsel === 1) { val = (val - 1) & 0xFFFF; if (isReg) regs[R16NAMES[modrm & 7]] = val; else { ww(addr, val); markVga(addr); } }
+        else if (wsel === 2) { regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip); regs.ip = val; } // call r/m16
+        else if (wsel === 4) { regs.ip = val; }                 // jmp r/m16
+        else if (wsel === 6) { regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), val); } // push r/m16
+        break; }
       case 0x8A: {                                               // mov r8, r/m8
         var m = fetchB();
         if ((m & 0xC0) === 0xC0) setR8((m >> 3) & 7, getR8(m & 7));
@@ -262,25 +337,6 @@
           var v2 = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
           setZS(flagsSub(regs[R16NAMES[(m >> 3) & 7]], v2, 16));
         }
-        break; }
-      case 0xF7: {                                               // test/not/neg/mul/div r/m16 (частично)
-        var m = fetchB();
-        var src = ((m & 0xC0) === 0xC0) ? regs[R16NAMES[m & 7]] : rw(rmAddr(m));
-        var reg = (m >> 3) & 7;
-        if (reg === 0) {                                          // TEST imm16 follows? F7 /0 = test
-          var t = fetchW(); setZS(regs[R16NAMES[m & 7] === undefined ? 'ax' : R16NAMES[m & 7]] & t); setZS(flagsSub(regs[R16NAMES[(m>>3)&7]] & t, 0, 16));
-        } else if (reg === 2) { regs[R16NAMES[m & 7]] = (~src) & 0xFFFF; }
-        else if (reg === 3) { regs[R16NAMES[m & 7]] = (-src) & 0xFFFF; setZS(regs[R16NAMES[m & 7]]); }
-        else if (reg === 4) { var p = regs.ax * src; regs.ax = p & 0xFFFF; regs.dx = (p >> 16) & 0xFFFF; if (p > 0xFFFF) regs.flags |= 1; else regs.flags &= ~1; }
-        else if (reg === 6 && src !== 0) { var q = Math.floor(((regs.dx << 16) | regs.ax) / src); regs.ax = q & 0xFFFF; regs.dx = ((regs.dx << 16 | regs.ax) % src) & 0xFFFF; }
-        break; }
-      case 0xF6: {                                               // test/not neg mul div byte
-        var m = fetchB();
-        var src = ((m & 0xC0) === 0xC0) ? getR8(m & 7) : rb(rmAddr(m));
-        var reg = (m >> 3) & 7;
-        if (reg === 2) setR8(m & 7, (~src) & 0xFF);
-        else if (reg === 3) { setR8(m & 7, (-src) & 0xFF); setZS8(getR8(m & 7)); }
-        else if (reg === 4) { var p = (regs.ax & 0xFF) * src; regs.ax = (regs.ax & 0xFF00) | (p & 0xFF); regs.ax = (regs.ax & 0x00FF) | (((p >> 8) & 0xFF) << 8); }
         break; }
       case 0xD1: {                                               // shl/shr r/m16 by 1 (via /4,/5)
         var m = fetchB();
@@ -348,7 +404,33 @@
         }
         break; }
       case 0x05: regs.ax = flagsAdd(regs.ax, fetchW(), 16); break;   // add ax,imm16
-      case 0x0D: regs.ax = flagsAdd(regs.ax, fetchW(), 16); break;   // or stub (or ax,imm) — близко по длине
+      case 0x0D: { var v = regs.ax | fetchW(); regs.ax = v & 0xFFFF; setZS(v); break; }   // or ax,imm16
+      case 0x25: regs.ax = flagsSub(regs.ax, fetchW(), 16); break;                        // sub ax,imm16
+      case 0x2D: regs.ax = flagsSub(regs.ax, fetchW(), 16); break;                        // sub ax,imm16
+      case 0x0C: { var v = regs.ax ^ fetchW(); regs.ax = v & 0xFFFF; setZS(v); break; }   // xor ax,imm16
+      case 0xF7: {                                                                       // grp3 r/m16: test/neg/not/mul/div
+        var m = fetchB(); var wsel = (m >> 3) & 7;
+        var isReg = (m & 0xC0) === 0xC0;
+        var dstA = isReg ? null : rmAddr(m);
+        var src = isReg ? regs[R16NAMES[m & 7]] : rw(dstA);
+        if (wsel === 0) { var t = fetchW(); setZS(src & t); }                             // test imm16
+        else if (wsel === 2) { var v = (~src) & 0xFFFF; if (isReg) regs[R16NAMES[m & 7]] = v; else { ww(dstA, v); markVga(dstA); } } // not
+        else if (wsel === 3) { var v = (-src) & 0xFFFF; setZS(v); if (isReg) regs[R16NAMES[m & 7]] = v; else { ww(dstA, v); markVga(dstA); } } // neg
+        else if (wsel === 4) { var p = regs.ax * src; regs.ax = p & 0xFFFF; regs.dx = (p >> 16) & 0xFFFF; if (p > 0xFFFF) regs.flags |= 1; else regs.flags &= ~1; } // mul
+        else if (wsel === 6 && src !== 0) { var acc = ((regs.dx << 16) | regs.ax) >>> 0; var q = Math.floor(acc / src); regs.ax = q & 0xFFFF; regs.dx = (acc - q * src) & 0xFFFF; } // div
+        else if (wsel === 6) { running = false; halted = 'divzero'; }
+        break; }
+      case 0xF6: {                                                                       // grp3 r/m8
+        var m = fetchB(); var wsel = (m >> 3) & 7;
+        var isReg = (m & 0xC0) === 0xC0;
+        var dstA = isReg ? null : rmAddr(m);
+        var src = isReg ? getR8(m & 7) : rb(dstA);
+        if (wsel === 0) { var t = fetchB(); setZS8(((isReg ? getR8(m & 7) : rb(dstA)) & t) & 0xFF); } // test imm8
+        else if (wsel === 2) { var v = (~src) & 0xFF; if (isReg) setR8(m & 7, v); else { wb(dstA, v); markVga(dstA); } }
+        else if (wsel === 3) { var v = (-src) & 0xFF; setZS8(v); if (isReg) setR8(m & 7, v); else { wb(dstA, v); markVga(dstA); } }
+        else if (wsel === 4) { var p = (regs.ax & 0xFF) * src; setR8(4, (p >> 8) & 0xFF); setR8(0, p & 0xFF); } // mul
+        else if (wsel === 6 && src !== 0) { var acc = ((regs.ax & 0xFF) << 8 | (regs.ax & 0xFF)); } // div8 — упрощённо не поддерживаем точно
+        break; }
       case 0x09: case 0x0B: case 0x08: case 0x0A: case 0x19: case 0x1B: case 0x18: case 0x1A: {
         // or/adc/sbb basic: трактуем or как add-only логически (для демо допустимо), sbb/adc -> CF игнор
         var m = fetchB();
@@ -392,9 +474,9 @@
         break; }
       case 0x06: case 0x0E: case 0x16: case 0x1E:                 // push es/ss/ds
         regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs[SEG_NAMES[(op >> 3) & 3]]); break;
-      case 0x07: case 0x17: case 0x1F:                             // pop es/ss/ds (pop cs 0x1F? нет: 0x1F=pop ds)
-        regs[SEG_NAMES[[0x07,0x0F,0x17,0x1F].indexOf(op) >= 0 ? ([0x07,0x0F,0x17,0x1F].indexOf(op)) : 0]] = rw(la(regs.ss, regs.sp));
-        regs.sp = (regs.sp + 2) & 0xFFFF; break;
+      case 0x07: regs.es = rw(la(regs.ss, regs.sp)); regs.sp = (regs.sp + 2) & 0xFFFF; break; // pop es
+      case 0x17: regs.ss = rw(la(regs.ss, regs.sp)); regs.sp = (regs.sp + 2) & 0xFFFF; break; // pop ss
+      case 0x1F: regs.ds = rw(la(regs.ss, regs.sp)); regs.sp = (regs.sp + 2) & 0xFFFF; break; // pop ds
       case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
       case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F: {   // jcc rel8
         var rel = fetchB() << 24 >> 24;
@@ -477,6 +559,7 @@
     pressKey: function (code) { keyQueue.push(code); },
     getConsole: function () { var s = consoleBuf; consoleBuf = ''; return s; },
     vgaBuffer: function () { return mem.subarray(0xA0000, 0xA0000 + 320 * 200); },
+    vgaMode: function () { return vgaMode; },
     vgaDirtyConsume: function () { var d = vgaDirty; vgaDirty = false; return d; },
     regs: regs, mem: mem
   };

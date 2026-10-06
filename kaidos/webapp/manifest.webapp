@@ -3,10 +3,10 @@
   "description": "16-bit DOS prototype (demo). Fallout 2 NOT supported.",
   "launch_path": "/index.html",
   "type": "privileged",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "developer": {
     "name": "kaidos-project",
-    "url": "https://github.com/"
+    "url": "https://example.com"
   },
   "default_locale": "en",
   "locales": {
@@ -20,14 +20,14 @@
     }
   },
   "icons": {
+    "32": "/img/icon-128.png",
+    "48": "/img/icon-128.png",
     "128": "/img/icon-128.png",
     "512": "/img/icon-512.png"
   },
   "permissions": {
-    "device-storage:sdcard": {
-      "access": "read-write"
-    }
+    "device-storage:sdcard": { "access": "readwrite" }
   },
   "fullscreen": true,
-  "orientation": ["landscape", "portrait"]
+  "orientation": ["landscape"]
 }

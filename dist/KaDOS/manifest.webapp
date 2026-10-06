@@ -1,0 +1,33 @@
+{
+  "name": "KaDOS",
+  "description": "16-bit DOS prototype (demo). Fallout 2 NOT supported.",
+  "launch_path": "/index.html",
+  "type": "privileged",
+  "version": "0.2.0",
+  "developer": {
+    "name": "kaidos-project",
+    "url": "https://example.com"
+  },
+  "default_locale": "en",
+  "locales": {
+    "en": {
+      "name": "KaDOS",
+      "description": "16-bit DOS prototype (demo)"
+    },
+    "ru": {
+      "name": "KaDOS",
+      "description": "Прототип эмулятора DOS 16-бит (демо)"
+    }
+  },
+  "icons": {
+    "32": "/img/icon-128.png",
+    "48": "/img/icon-128.png",
+    "128": "/img/icon-128.png",
+    "512": "/img/icon-512.png"
+  },
+  "permissions": {
+    "device-storage:sdcard": { "access": "readwrite" }
+  },
+  "fullscreen": true,
+  "orientation": ["landscape"]
+}

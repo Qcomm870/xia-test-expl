@@ -1,13 +1,33 @@
 {
-  "name": "KaDOS prototype",
-  "description": "Non-functional DOS emulator skeleton for KaiOS",
+  "name": "KaDOS",
+  "description": "16-bit DOS prototype (demo). Fallout 2 NOT supported.",
   "launch_path": "/index.html",
   "type": "privileged",
-  "version": "0.0.1",
-  "developer": { "name": "experiment", "url": "" },
+  "version": "0.1.0",
+  "developer": {
+    "name": "kaidos-project",
+    "url": "https://github.com/"
+  },
   "default_locale": "en",
-  "locales": { "en": { "name": "KaDOS", "description": "skeleton" } },
-  "permissions": {},
+  "locales": {
+    "en": {
+      "name": "KaDOS",
+      "description": "16-bit DOS prototype (demo)"
+    },
+    "ru": {
+      "name": "KaDOS",
+      "description": "Прототип эмулятора DOS 16-бит (демо)"
+    }
+  },
+  "icons": {
+    "128": "/img/icon-128.png",
+    "512": "/img/icon-512.png"
+  },
+  "permissions": {
+    "device-storage:sdcard": {
+      "access": "read-write"
+    }
+  },
   "fullscreen": true,
-  "orientation": ["landscape"]
+  "orientation": ["landscape", "portrait"]
 }

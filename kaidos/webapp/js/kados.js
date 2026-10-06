@@ -125,6 +125,7 @@
     } else if (f === 2) { regs.ax = 0; }                         // shift states
   }
   var vgaMode = 3;
+  var LOOP_WINDOW = 4096, stepsSinceChange = 0;
   function int10() {
     var f = regs.ax >> 8;
     if (f === 0x00) {                                             // set video mode
@@ -173,8 +174,11 @@
       case 0xE9: regs.ip = (regs.ip + (fetchW() << 16 >> 16)) & 0xFFFF; break; // jmp rel16
       case 0xE8: {                                                // call rel16
         var d = fetchW() << 16 >> 16;                             // fetchW уже сдвинул IP за imm
-        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);   // return addr = IP после инструкции
-        regs.ip = (regs.ip + d) & 0xFFFF; break; }               // target = IP(конец инстр) + disp
+        var retAddr = (regs.ip + d) & 0xFFFF;                     // цель перехода
+        regs.ip = (regs.ip - d) & 0xFFFF;                         // временный IP = конец инструкции
+        regs.sp = (regs.sp - 2) & 0xFFFF; ww(la(regs.ss, regs.sp), regs.ip);   // адрес возврата
+        regs.ip = retAddr; break;                                 // прыжок к цели
+      }
 
       case 0xC6: {                                               // mov r/m8, imm8
         var m = fetchB(); var v8 = fetchB();
@@ -248,7 +252,7 @@
       // NOTE: A0-A3 в real mode — это mov reg/mov [imm16], СЕГМЕНТ = DS (не far!)
       // A0-A3: адрес = (disp16 | (seg<<16)) & 0xFFFFF — поддерживает far-адрес вида A000:0000
       case 0xA3: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; ww(a, regs.ax); markVga(a); break; } // mov [m16],ax
-      case 0xA2: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; wb(a, regs.ax & 0xFF); markVga(a); break; } // mov [m8],al
+      case 0xA2: { var off = fetchW(); var moffs = fetchW(); var a = la(moffs, off); wb(a, regs.ax & 0xFF); markVga(a); break; } // mov moffs8,al (far-адрес из кода)
       case 0xA0: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; setR8(0, rb(a)); break; } // mov al,[m16]
       case 0xA1: { var off = fetchW(); var a = ((off & 0xFFFF) | (regs.ds << 16)) & MEM_SIZE_MASK; regs.ax = rw(a); break; } // mov ax,[m16]
       case 0xAA: { var a = la(regs.es, regs.di); wb(a, regs.ax & 0xFF); markVga(a); regs.di = (regs.di + 1) & 0xFFFF; break; } // stosb
@@ -545,9 +549,12 @@
       }
       var prevIp = regs.ip;
       step(prevIp, n); n++;
-      if (halted === 'selfloop') break;              // tight-петля: отдаём управление UI (main.js продолжит slice)
-      // страховка: IP вернулся туда же и цикл без прерываний — тоже считаем плотной петлёй
-      if (n > 1 && halted === null && regs.ip === prevIp) { halted = 'selfloop'; break; }
+      if (regs.ip !== prevIp) stepsSinceChange = 0; else stepsSinceChange++;
+      if (!running || halted !== null) break;        // exit/halt/key/selfloop — выходим честно
+      // страховка от зависания в бесконечной петле: срабатывает ТОЛЬКО если за последние
+      // LOOP_WINDOW шагов IP ни разу не менялся. Нормальные циклы (jmp -2, loop) имеют
+      // чередующиеся адреса и детектор не трогают.
+      if (stepsSinceChange >= LOOP_WINDOW) { halted = 'selfloop'; break; }
     }
     return { running: running, halted: halted, steps: n };
   }

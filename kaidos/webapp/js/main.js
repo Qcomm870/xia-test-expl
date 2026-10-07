@@ -95,8 +95,12 @@
   }
 
   function t9Render() {
-    var text = t9CommittedText();
-    var visible = text + t9VisiblePending();
+    /* v0.2.58: терминальный ввод живёт ТОЛЬКО в putChar-сетке (терминальная
+       область, как в оригинале Terminal от Affe Null). Строка terminalLine —
+       источник истины; нижняя строка t9-buffer/hud показывает её копию, а не
+       второй вывод. Pending-группа НЕ показывается отдельным «[f]» — символ
+       уже напечатан в сетке и циклически заменяется там же. */
+    var visible = terminalLine;
     syncHiddenInput();
     if (t9BufferEl && t9CaretEl) {
       var node = document.createTextNode(visible);
@@ -109,8 +113,7 @@
       var options = t9Key >= 0 && t9Keys[t9Key] ? t9Keys[t9Key].join(' ') : '';
       t9HintEl.textContent = modeStr + (options ? ' | ' + options : '');
     }
-    terminalLine = text;
-    if (terminalInput) terminalInput.value = text;
+    if (terminalInput) terminalInput.value = terminalLine;
     /* hud-дублирование строки ввода только когда терминал ОТКРЫТ — иначе
        каждый кадр loop() затирал статус эмулятора и «съедал» вывод. */
     if (hud && terminalIsOpen()) hud.textContent = '>' + (visible || ' ') + ' [' +
@@ -118,15 +121,7 @@
   }
 
   function t9SetText(text) {
-    if (!t9BufferEl) return;
-    /* замена только текстового узла — caret-элемент не должен теряться */
-    var node = t9BufferEl.firstChild;
-    if (node && node.nodeType === 3) node.nodeValue = text;
-    else if (node) { while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild); }
-    if (!t9BufferEl.firstChild || t9BufferEl.firstChild.nodeType !== 3) {
-      t9BufferEl.insertBefore(document.createTextNode(text), t9BufferEl.firstChild);
-    }
-    if (t9CaretEl && !t9BufferEl.contains(t9CaretEl)) t9BufferEl.appendChild(t9CaretEl);
+    terminalLine = text || '';
   }
 
   /* Принудительное подтверждение pending-символа (Enter/Backspace/#/Call). */
@@ -135,90 +130,109 @@
     if (t9Key >= 0) t9Commit();
   }
 
-  /* КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ (v0.2.57): раньше pending-символ НЕ печатался в
-     сетку терминала до подтверждения — пользователь видел только «[f]» или
-     ничего. В оригинале Terminal от Affe Null символ уходит на сервер сразу
-     при первом нажатии и затем циклически заменяется через backspace.
-     Делаем то же самое: commit пишет символ в putChar-сетку ЭХОМ немедленно,
-     а replace-цикл сдвигает каретку назад на одну ячейку. */
-  function t9Commit() {
-    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    if (t9Key < 0) return;
-    var text = t9CommittedText();
-    var ch = t9CharFor(t9Key, t9Index);
+  /* v0.2.58 — Точный порт модели ввода Terminal от Affe Null (app.js).
+     Чему мы научились на реальных прогонах (жалобы «сначала [f], потом f»,
+     «нет вывода», «не стирается»): ДВОЙНОЙ рендер строки ввода.
+     Раньше символы печатались ОДНОВРЕМЕННО в два места — putChar-сетку
+     терминала (эхо) и нижнюю строку t9-buffer. На экране это выглядело как
+     мусор: буква в сетке, потом та же буква в буфере, при замене a->b старая
+     оставалась в истории и т.п.
+
+     В оригинале есть ЕДИНСТВЕННАЯ область — сетка putChar. Отправка (send)
+     происходит мгновенно telnetSend-ом; сервер возвращает echo; повторные
+     нажатия заменяют символ через '\b'. У нас роль «сервера» играет локальный
+     движок: termSend() печатает символ один раз в сетку, замена — '\b'+ch,
+     Backspace по пустому pending шлёт '\b'. t9-buffer остаётся ТОЛЬКО видимой
+     копией строки (никакого второго вывода). */
+  function t9ApplyCase(ch) {
     if (/^[a-z]$/.test(ch)) {
       if (t9Control) ch = String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 0x40);
       else if (t9Upper) ch = ch.toUpperCase();
     }
-    var replacing = t9WasReplace;
-    text += ch;
-    t9SetText(text);
-    if (terminalIsOpen()) {
-      if (replacing) {
-        /* замена предыдущего символа группы: каретка назад на 1 ячейку */
-        termPrint('\b');
-      }
-      termPrint(ch);
+    return ch;
+  }
+
+  /* Единственная точка печати ввода (аналог sock.send в оригинале). */
+  function t9SendRaw(ch) {
+    termPrint(ch);                       // putChar-сетка — единственный вывод
+    if (ch !== '\b') terminalLine += ch; // история строки для Enter/CLS
+  }
+
+  /* Подтверждение текущего pending-символа (send() в оригинале). */
+  function t9Commit() {
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    if (t9Key < 0) return;
+    var ch = t9ApplyCase(t9CharFor(t9Key, t9Index));
+    if (t9PendingSent) {
+      /* символ уже напечатан ранее — заменяем его на месте, как оригинал:
+         '\b' затирает предыдущий символ, затем печать нового */
+      t9SendRaw('\b');
     }
+    t9SendRaw(ch);
+    t9PendingSent = true;                // теперь pending живёт В СЕТКЕ
     t9Key = -1;
     t9Index = 0;
-    t9Control = false;
-    t9WasReplace = false;
+    t9Control = false;                   // Ctrl одноразовый (как control=false в send())
     t9Render();
   }
-  var t9WasReplace = false;
 
   /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
   function t9PressGroup(groupIndex) {
     var group = t9Keys[groupIndex] || [String(groupIndex)];
     if (t9Key === groupIndex) {
-      /* повторное нажатие той же клавиши: старый pending-символ ещё НЕ был
-         напечатан в сетке (он жил только в буфере) — просто меняем индекс */
+      /* повторное нажатие той же клавиши: индексируем группу; если символ
+         уже был отправлен в сетку — цикл замены произойдёт в t9Commit
+         ('\b'+новый), ровно как в оригинале после telnetSend */
       t9Index = (t9Index + 1) % group.length;
+      if (t9PendingSent) {
+        /* мгновенная замена в сетке (эквивалент send() на каждом нажатии) */
+        t9SendRaw('\b');
+        t9SendRaw(t9ApplyCase(t9CharFor(groupIndex, t9Index)));
+      }
       t9Render();
     } else {
-      if (t9Key >= 0) { t9WasReplace = false; t9Commit(); }
+      if (t9Key >= 0) t9Commit();
       t9Key = groupIndex;
       t9Index = 0;
-      /* мгновенный эхо-вывод первого символа группы (как telnetSend в
-         оригинале): символ виден СРАЗУ, не нужно ждать таймер добора */
-      var firstCh = t9CharFor(groupIndex, 0);
-      if (/^[a-z]$/.test(firstCh)) firstCh = t9Upper ? firstCh.toUpperCase() : firstCh;
-      if (terminalIsOpen()) termPrint(firstCh);
-      t9PendingEchoed = true;
+      /* первое нажатие клавиши: символ отправляется СРАЗУ (telnetSend в
+         onkeydown оригинала) — пользователь видит букву немедленно, без
+         ожидания таймера и без дублей */
+      t9SendRaw(t9ApplyCase(t9CharFor(groupIndex, 0)));
+      t9PendingSent = true;
       t9Render();
     }
     if (t9Timer) clearTimeout(t9Timer);
-    t9Timer = setTimeout(function () { t9WasReplace = t9PendingEchoed; t9Commit(); }, 1000);
+    /* в оригинале sendTimeoutId = setTimeout(send, 1000) — у нас коммит
+       ничего не меняет визуально (символ уже в сетке), но фиксирует конец
+       группы: следующее нажатие другой клавиши не будет «заменять» этот */
+    t9Timer = setTimeout(function () { t9Commit(); }, 1000);
   }
-  var t9PendingEchoed = false;
+  var t9PendingSent = false;   // pending-символ уже напечатан в putChar-сетке
 
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     if (t9Key >= 0) {
-      /* сброс незавершённой группы: если первый символ уже был напечатан
-         эхом в сетку — стереть его там же ('\b' ставит пробел и назад) */
-      if (t9PendingEchoed && terminalIsOpen()) termPrint('\b');
-      t9Key = -1; t9Index = 0; t9PendingEchoed = false; t9Render(); return;
+      /* как в оригинале: пока идёт набор группы, Backspace ПРОСТО ОТМЕНЯЕТ
+         её (clearTimeout, currentKey=-1) — если символ уже был послан в
+         сетку, стираем его '\b' */
+      if (t9PendingSent) t9SendRaw('\b');
+      t9Key = -1; t9Index = 0; t9PendingSent = false; t9Render(); return;
     }
-    var text = t9CommittedText();
-    if (text.length) {
-      t9SetText(text.slice(0, -1));
-      if (terminalIsOpen()) termPrint('\b');
+    /* нет активного pending — отправляем '\b' серверу (терминалу): стирает
+       последний символ строки ввода в putChar-сетке */
+    if (terminalLine.length) {
+      t9SendRaw('\b');
+      terminalLine = terminalLine.slice(0, -1);
       t9Render();
     }
   }
 
   function t9Submit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    /* ВАЖНО (исправление v0.2.54): раньше commit шёл ПОСЛЕ чтения буфера —
-       последний pending-символ терялся ("hel|lo" -> "hello" отправлялось как
-       "hell"). Теперь сначала подтверждение, потом чтение. */
-    t9WasReplace = false;   /* pending ещё не в сетке — коммит без backspace */
-    t9Commit();
-    var command = t9CommittedText();
-    t9SetText('');
-    t9PendingEchoed = false;
+    t9Commit();                          // подтвердить pending (без '\b', он уже в сетке)
+    var command = terminalLine;          // строка уже набрана эхом в сетке
+    terminalLine = '';
+    t9PendingSent = false;
     t9Render();
     submitTerminalLine(command);
   }
@@ -492,17 +506,17 @@
   function submitTerminalLine(forcedCommand) {
     var command = typeof forcedCommand === 'string' ? forcedCommand
       : (terminalInput ? terminalInput.value : terminalLine);
+    if (typeof forcedCommand !== 'string') {
+      /* вызов не из T9-пути (например, form.submit с автоподстановкой):
+         строка не была напечатана эхом — печатаем '> команда', как telnet-echo */
+      termPrint('> ' + command);
+    }
     terminalLine = '';
     if (terminalInput) terminalInput.value = '';
-    /* ЭХО набранной строки — как в оригинале Terminal от Affe Null: там
-       telnet-сервер возвращает набранное обратно, и putChar печатает его в
-       сетку ДО вывода команды.
-
-       ВАЖНО (исправление v0.2.57): с мгновенным эхом ввода символы УЖЕ
-       напечатаны в сетке по мере нажатия клавиш. Поэтому здесь больше НЕ
-       печатаем "> команда" целиком (иначе было бы двойное отображение —
-       «f» потом ещё раз вся строка). Печатаем только приглашение ">" на
-       новой строке перед выводом результата. */
+    /* ЭХО набранной строки — как в оригинале Terminal от Affe Null: символы
+       уже напечатаны в putChar-сетку по мере нажатия клавиш (t9SendRaw),
+       поэтому здесь НЕ печатаем "> команда" целиком (иначе дубль).
+       Печатаем только перевод строки перед выводом результата. */
     termPrint('\n');
     runTerminalCommand(command, true);
   }
@@ -566,8 +580,10 @@
     if (key === 'SoftLeft') {
       event.preventDefault();
       event.stopPropagation();
+      /* как в оригинале: сначала send() pending-группы, затем печать пробела
+         (в Terminal от Affe Null SoftLeft = Tab '\t'; у нас пробел нужнее) */
       t9ForceCommit();
-      t9SetText(t9CommittedText() + ' ');
+      t9SendRaw(' ');
       t9Render();
       return true;
     }
@@ -577,23 +593,23 @@
   function terminalHistoryMove(direction) {
     if (!terminalCommands.length) return;
     if (terminalHistoryIndex === terminalCommands.length && direction === 'ArrowUp') {
-      terminalHistoryDraft = terminalInput ? terminalInput.value : terminalLine;
+      terminalHistoryDraft = terminalLine;
     }
     var result = window.KaLoader.navigateCommandHistory(terminalCommands, terminalHistoryIndex, direction);
     terminalHistoryIndex = result.index;
     var command = terminalHistoryIndex === terminalCommands.length ? terminalHistoryDraft : result.command;
-    /* показываем выбранную историю прямо в видимый T9-буфер */
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    /* ВАЖНО (исправление v0.2.57): если была незавершённая группа с
-       мгновенным эхом в сетке — стереть её символ ('\b'), иначе введённый
-       вручную «h» останется в строке поверх подставленной истории */
-    if (t9Key >= 0 && t9PendingEchoed && terminalIsOpen()) termPrint('\b');
+    /* v0.2.58: стираем из сетки всю текущую набранную строку (pending уже
+       напечатан в неё), затем перепечатываем выбранную команду истории —
+       ровно так, как сервер telnet прислал бы новую строку */
+    for (var bi = 0; bi < terminalLine.length; bi++) termPrint('\b');
+    if (t9Key >= 0 && t9PendingSent) termPrint('\b');
     t9Key = -1;
     t9Index = 0;
-    t9PendingEchoed = false;
-    t9SetText(command || '');
-    /* саму команду истории НЕ печатаем в сетку — она видна в буфере ввода;
-       в оригинале telnet тоже присылает echo только когда сервер решит */
+    t9PendingSent = false;
+    terminalLine = '';
+    termPrint(command || '');
+    terminalLine = command || '';
     t9Render();
   }
 
@@ -762,9 +778,8 @@
        В терминале Enter это ввод команды, поэтому алиас проверяем по keyCode. */
     if (key === ' ' || (key === 'Enter' && (event.keyCode === 32 || event.code === 'Space'))) {
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-      t9Key = -1; t9Index = 0; t9PendingEchoed = false;
-      t9SetText(t9CommittedText() + ' ');
-      termPrint(' ');   /* мгновенное эхо пробела в сетку (v0.2.57) */
+      t9Key = -1; t9Index = 0; t9PendingSent = false;
+      t9SendRaw(' ');                    // единственный рендер ввода (v0.2.58)
       t9Render();
       event.preventDefault();
       event.stopPropagation();
@@ -774,9 +789,8 @@
     if (key && key.length === 1 && /[a-zа-яё]/i.test(key)) {
       var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-      t9Key = -1; t9Index = 0; t9PendingEchoed = false;
-      t9SetText(t9CommittedText() + ch);
-      termPrint(ch);    /* мгновенное эхо символа в сетку (v0.2.57) */
+      t9Key = -1; t9Index = 0; t9PendingSent = false;
+      t9SendRaw(ch);                     // единственный рендер ввода (v0.2.58)
       t9Render();
       event.preventDefault();
       event.stopPropagation();

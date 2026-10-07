@@ -61,11 +61,34 @@
     return out;
   }
 
+  /* Т9-раскладка Affe Null (terminal от OmniSD) построена по НОМЕРАМ клавиш:
+     keys[0]=' ', keys[1]= punct+цифры, keys[2..9] = буквы на клавишах 2..9.
+     В оригинале символ выбирается как keys[num][index], где num — цифра клавиши. */
+  function t9CharFor(num, index) {
+    var group = t9Keys[num];
+    if (!group) return String(num);
+    return group[index % group.length];
+  }
+
   function t9VisiblePending() {
     if (t9Key < 0) return '';
-    var ch = t9Keys[t9Key][t9Index];
-    if (/[a-z]/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
+    var ch = t9CharFor(t9Key, t9Index);
+    if (/^[a-z]$/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
     return '[' + ch + ']';
+  }
+
+  /* Эхо ввода прямо в сетку терминала (как локальное эхо telnet-клиента):
+     строка набранного текста рисуется поверх пустой последней строки, не
+     сдвигая её; при подтверждении Enter она уходит в историю обычным путём. */
+  function t9EchoLive() {
+    if (!terminalIsOpen()) return;
+    ensureTermGrid();
+    if (!termChars.length) return;
+    var visible = '> ' + (t9CommittedText() + t9VisiblePending());
+    var row = TERM_ROWS - 1;
+    for (var x = 0; x < TERM_COLS; x++) {
+      termSetChar(x, row, x < visible.length ? visible.charAt(x) : ' ');
+    }
   }
 
   function t9Render() {
@@ -78,11 +101,12 @@
     t9BufferEl.appendChild(t9CaretEl);
     if (t9HintEl) {
       var mode = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
-      var options = t9Key >= 0 ? t9Keys[t9Key].join(' ') : '';
+      var options = t9Key >= 0 && t9Keys[t9Key] ? t9Keys[t9Key].join(' ') : '';
       t9HintEl.textContent = mode + (options ? ' | ' + options : '');
     }
     terminalLine = text;
     if (terminalInput) terminalInput.value = text;
+    t9EchoLive();
   }
 
   function t9SetText(text) {
@@ -100,8 +124,8 @@
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     if (t9Key < 0) return;
     var text = t9CommittedText();
-    var ch = t9Keys[t9Key][t9Index];
-    if (/[a-z]/.test(ch)) {
+    var ch = t9CharFor(t9Key, t9Index);
+    if (/^[a-z]$/.test(ch)) {
       if (t9Control) ch = String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 0x40);
       else if (t9Upper) ch = ch.toUpperCase();
     }
@@ -113,9 +137,11 @@
     t9Render();
   }
 
+  /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
   function t9PressGroup(groupIndex) {
+    var group = t9Keys[groupIndex] || [String(groupIndex)];
     if (t9Key === groupIndex) {
-      t9Index = (t9Index + 1) % t9Keys[groupIndex].length;
+      t9Index = (t9Index + 1) % group.length;
     } else {
       if (t9Key >= 0) t9Commit();
       t9Key = groupIndex;
@@ -207,62 +233,131 @@
     return panel && !panel.classList.contains('hidden');
   }
 
-  /* ===== Терминальная сетка (порт из Terminal от Affe Null, app.js) =====
-     Как в оригинале: N строк по M колонок, каждая строка — <span> с
-     посимвольными <span> + <br>; при переполнении первая строка удаляется
-     (newLine/removeChild(elTerm.firstChild)). Никакого innerHTML-хеша и
-     «последняя строка обрезается» — вывод обновляется мгновенно. */
-  var TERM_COLS = 20;   // как maxx в оригинале (240px / 18px моноширинный)
-  var TERM_ROWS = 12;   // как maxy в оригинале (минус шапка/подсказка/ввод)
+  /* ===== Полностью порт движка Terminal от Affe Null (app.js) =====
+     Сетка 20x13, putChar/newLine/setChar один-в-один как в оригинале.
+     Никаких баннеров («Welcome to KaDOS» убран), вывод появляется сразу,
+     строка ввода рисуется отдельным DOM-узлом (не перекрывает вывод). */
+  var TERM_COLS = 20;   // maxx в оригинале (240px / 18px Droid Sans Mono)
+  var TERM_ROWS = 13;   // maxy в оригинале
   var termGridEl = null;
-  var termRows = [];    // массив span-элементов строк
+  var termChars = [];   // chars[y][x] = span-элементы, как в оригинале
+  var termCurX = 0, termCurY = 0;
 
   function ensureTermGrid() {
     if (!termGridEl) termGridEl = document.getElementById('terminal-output');
-    if (termGridEl && !termRows.length) {
+    if (termGridEl && !termChars.length) {
       termGridEl.innerHTML = '';
       for (var i = 0; i < TERM_ROWS; i++) {
         var lineEl = document.createElement('span');
+        var rowArr = [];
         for (var j = 0; j < TERM_COLS; j++) {
           var chEl = document.createElement('span');
           chEl.textContent = ' ';
+          rowArr.push(chEl);
           lineEl.appendChild(chEl);
         }
+        termChars.push(rowArr);
         termGridEl.appendChild(lineEl);
         termGridEl.appendChild(document.createElement('br'));
-        termRows.push(lineEl);
       }
     }
     return termGridEl;
   }
 
-  /* Печать одного символа в позицию сетки (как setChar в оригинале) */
-  function termSetCell(row, col, ch) {
-    var lineEl = termRows[row];
-    if (!lineEl) return;
-    var cell = lineEl.childNodes[col];
+  /* setChar из оригинала: печать символа в ячейку */
+  function termSetChar(x, y, ch) {
+    var cell = termChars[y] && termChars[y][x];
     if (cell) cell.textContent = ch;
   }
 
-  /* Полный redraw текстового буфера по сетке 20xTERM_ROWS, хвост виден */
-  function termPaint(text) {
-    var display = ensureTermGrid();
-    if (!display) return;
-    var lines = String(text).split('\n');
-    if (lines.length && lines[lines.length - 1] === '') lines.pop();
-    if (lines.length > TERM_ROWS) lines = lines.slice(lines.length - TERM_ROWS);
-    for (var i = 0; i < TERM_ROWS; i++) {
-      var line = lines[i] || '';
-      if (line.length > TERM_COLS) line = line.slice(0, TERM_COLS);
-      for (var j = 0; j < TERM_COLS; j++) {
-        termSetCell(i, j, j < line.length ? line.charAt(j) : ' ');
-      }
+  /* newLine из оригинала: сдвиг экрана вверх, новая пустая строка снизу */
+  function termNewLine() {
+    var firstLine = termGridEl.firstChild;
+    if (firstLine) termGridEl.removeChild(firstLine);           // span строки
+    var second = termGridEl.firstChild;
+    if (second && second.nodeName === 'BR') termGridEl.removeChild(second);
+    termChars.shift();
+    var lineEl = document.createElement('span');
+    var rowArr = [];
+    for (var j = 0; j < TERM_COLS; j++) {
+      var chEl = document.createElement('span');
+      chEl.textContent = ' ';
+      rowArr.push(chEl);
+      lineEl.appendChild(chEl);
     }
+    termChars.push(rowArr);
+    termGridEl.appendChild(lineEl);
+    termGridEl.appendChild(document.createElement('br'));
   }
 
+  /* putChar из оригинала: посимвольный рендер с переносом и скроллом */
+  function termPutChar(ch) {
+    ensureTermGrid();
+    if (!termChars.length) return;
+    if (ch === '\n') {
+      if (termCurY >= TERM_ROWS - 1) termNewLine();
+      else termCurY++;
+      return;
+    }
+    if (ch === '\r') { termCurX = 0; return; }
+    if (ch === '\b') {
+      if (termCurX > 0) { termCurX--; termSetChar(termCurX, termCurY, ' '); }
+      return;
+    }
+    if (ch.charCodeAt(0) < 0x20) return;                        // прочие control — игнор
+    if (termCurX >= TERM_COLS) {                                // wrap как в оригинале
+      termCurX = 0;
+      if (termCurY >= TERM_ROWS - 1) termNewLine();
+      else termCurY++;
+    }
+    termSetChar(termCurX, termCurY, ch);
+    termCurX++;
+  }
+
+  /* putStr из оригинала */
+  function termPutStr(str) {
+    for (var i = 0; i < str.length; i++) termPutChar(str.charAt(i));
+  }
+
+  /* Полный сброс и перерисовка истории (для CLS / FILES и т.п.) */
   function renderTerminal() {
+    ensureTermGrid();
+    if (!termGridEl) return;
+    while (termGridEl.firstChild) termGridEl.removeChild(termGridEl.firstChild);
+    termChars = [];
+    termCurX = 0; termCurY = 0;
+    for (var i = 0; i < TERM_ROWS; i++) termNewLine();
     var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    termPaint(text);
+    termPutStr(text);
+    /* сброс флага инкрементального вывода: вся история уже отрисована,
+       иначе next loop() напечатает consoleText повторно поверх истории */
+    lastEmuConsoleLength = (window.KaDOS && window.KaDOS.getConsole)
+      ? String(window.KaDOS.getConsole() || '').length : 0;
+  }
+
+  /* Инкрементальный вывод без полного redraw (главный путь для loop()).
+     Вывод эмулятора (consoleText) печатается ТОЛЬКО новыми символами —
+     иначе каждый кадр перепечатывался весь буфер и экран «не двигался». */
+  var lastEmuConsoleLength = 0;
+
+  function termAppend(text) {
+    termPutStr(String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+  }
+
+  function termAppendEmuDelta() {
+    if (!window.KaDOS || !window.KaDOS.getConsole) return;
+    var full = String(window.KaDOS.getConsole() || '');
+    if (full.length <= lastEmuConsoleLength) {
+      /* программа перезапущена/буфер сброшен — перерисовать с нуля */
+      if (full.length < lastEmuConsoleLength) {
+        lastEmuConsoleLength = 0;
+        termAppendEmuDelta();
+      }
+      return;
+    }
+    var delta = full.slice(lastEmuConsoleLength);
+    lastEmuConsoleLength = full.length;
+    termAppend(delta);
   }
 
   function closeTerminal() {
@@ -318,6 +413,10 @@
       : (terminalInput ? terminalInput.value : terminalLine);
     terminalLine = '';
     if (terminalInput) terminalInput.value = '';
+    /* курсор сетки на пустую последнюю строку: эхо-строка "> text" будет
+       перезаписана выводом команды, как в оригинальном telnet-терминале */
+    termCurX = 0;
+    termCurY = TERM_ROWS - 1;
     if (command.trim()) terminalCommands.push(command);
     terminalHistoryIndex = terminalCommands.length;
     terminalHistoryDraft = '';
@@ -390,28 +489,51 @@
     t9Index = 0;
     t9SetText(command || '');
     t9Render();
-    renderTerminal();
+  }
+
+  /* Вывод строки в терминал: история + putChar-сетка (как putStr в оригинале).
+     renderTerminal() вызывается только для CLS/FILES — инкрементальный путь
+     не делает полный redraw каждый кадр. */
+  function termPrint(text) {
+    terminalHistory += text;
+    if (terminalIsOpen()) termAppend(text);
   }
 
   function runTerminalCommand(command) {
     var source = String(command || '').trim();
     if (!source) return;
-    terminalHistory += '> ' + source + '\n';
+    termPrint('> ' + source + '\n');
     var firstSpace = source.indexOf(' ');
     var name = (firstSpace < 0 ? source : source.slice(0, firstSpace)).toUpperCase();
     var argument = firstSpace < 0 ? '' : source.slice(firstSpace + 1).trim();
 
+    /* Поддержка T9-ошибок Nokia: пробелы внутри слова недопустимы в командах —
+       если после имени команды идёт «слипшаяся» строка без пробела (например
+       "R UN HELLO" или "RUNHELLO"), пробуем распознать команду по префиксу. */
+    if (!['HELP', 'FILES', 'RUN', 'SEND', 'CLS', 'EXIT'].includes(name)) {
+      var knownCommands = ['HELP', 'FILES', 'RUN', 'SEND', 'CLS', 'EXIT'];
+      for (var ci = 0; ci < knownCommands.length; ci++) {
+        var kc = knownCommands[ci];
+        if (name.length > kc.length && name.indexOf(kc) === 0) {
+          argument = name.slice(kc.length) + (argument ? ' ' + argument : '');
+          name = kc;
+          break;
+        }
+      }
+    }
+
     if (name === 'HELP') {
-      terminalHistory += 'HELP  FILES  RUN <file>  SEND <text>  CLS  EXIT\n';
+      termPrint('HELP  FILES  RUN <file>  SEND <text>  CLS  EXIT\n');
     } else if (name === 'CLS') {
       terminalHistory = '';
       consoleText = '';
+      renderTerminal();
     } else if (name === 'EXIT') {
       closeTerminal();
       return;
     } else if (name === 'SEND') {
       if (!argument) {
-        terminalHistory += 'Usage: SEND <text>\n';
+        termPrint('Usage: SEND <text>\n');
       } else {
         var nonAscii = false;
         for (var i = 0; i < argument.length; i++) {
@@ -422,10 +544,49 @@
           }
           window.KaDOS.pressKey(code);
         }
-        if (nonAscii) terminalHistory += 'DOS input accepts ASCII text only.\n';
+        if (nonAscii) termPrint('DOS input accepts ASCII text only.\n');
         else window.KaDOS.pressKey(13);
       }
     } else if (name === 'FILES' || name === 'RUN') {
+      /* встроенные демо (HELLO/ECHO/COUNT) ищем сразу — без SD-сканирования;
+         на Nokia 800 Tough Device Storage API может быть недоступен,
+         а демо зашиты в KaLoader.DEMOS */
+      var demoMatch = window.KaLoader && window.KaLoader.DEMOS
+        ? window.KaLoader.DEMOS.filter(function (d) {
+            var dn = String(d.name).toUpperCase();
+            return argument && (dn === argument.toUpperCase() || dn === argument.toUpperCase() + '.COM');
+          })[0] : null;
+      if (name === 'RUN' && demoMatch) {
+        termPrint('Starting ' + demoMatch.name + '\n');
+        loadProgram(demoMatch.bytes, demoMatch.name);
+        return;
+      }
+      /* RUN без SD-хранилища: fallback на встроенные демо даже при ошибке API */
+      function runFromDemos() {
+        var demos = (window.KaLoader && window.KaLoader.DEMOS) || [];
+        var found = demos.filter(function (d) {
+          var dn = String(d.name).toUpperCase();
+          return argument && (dn === argument.toUpperCase() || dn === argument.toUpperCase() + '.COM');
+        })[0];
+        if (found) {
+          termPrint('Starting ' + found.name + ' (built-in)\n');
+          loadProgram(found.bytes, found.name);
+        } else {
+          termPrint('Program not found: ' + argument + '\n');
+          termPrint('Built-in: ' + demos.map(function (d) { return d.name; }).join(', ') + '\n');
+        }
+      }
+      if (!window.navigator || (typeof window.navigator.getDeviceStorages !== 'function' &&
+          typeof window.navigator.getDeviceStorage !== 'function')) {
+        if (name === 'FILES') {
+          terminalHistory += ((window.KaLoader && window.KaLoader.DEMOS) || [])
+            .map(function (d) { return d.name + ' (built-in)'; }).join('\n') + '\n';
+          renderTerminal();
+        } else {
+          runFromDemos();
+        }
+        return;
+      }
       window.KaLoader.listSdFiles().then(function (items) {
         var programs = items.filter(function (item) { return /\.(com|bin)$/i.test(item.name || item.path || ''); });
         if (name === 'FILES') {
@@ -436,8 +597,7 @@
           return;
         }
         if (!argument) {
-          terminalHistory += 'Usage: RUN <file.com>\n';
-          renderTerminal();
+          termPrint('Usage: RUN <file.com>\n');
           return;
         }
         var requested = argument.toLowerCase();
@@ -446,34 +606,28 @@
             String(item.name || '').toLowerCase() === requested + '.com';
         })[0];
         if (!match) {
-          terminalHistory += 'Program not found: ' + argument + '\n';
-          renderTerminal();
+          termPrint('Program not found: ' + argument + '\n');
           return;
         }
         try {
           window.KaLoader.validateProgramFile(match.file);
         } catch (error) {
-          terminalHistory += (error.message || String(error)) + '\n';
-          renderTerminal();
+          termPrint((error.message || String(error)) + '\n');
           return;
         }
         window.KaLoader.readFile(match.file).then(function (bytes) {
           setCurrentFile(match, match.name);
-          terminalHistory += 'Starting ' + match.name + '\n';
+          termPrint('Starting ' + match.name + '\n');
           loadProgram(bytes, match.name);
-          renderTerminal();
         }, function (error) {
-          terminalHistory += 'Could not read program: ' + (error.message || error) + '\n';
-          renderTerminal();
+          termPrint('Could not read program: ' + (error.message || error) + '\n');
         });
       }, function (error) {
-        terminalHistory += 'Storage error: ' + (error.message || error) + '\n';
-        renderTerminal();
+        termPrint('Storage error: ' + (error.message || error) + '\n');
       });
     } else {
-      terminalHistory += 'Unknown command: ' + name + '\n';
+      termPrint('Unknown command: ' + name + '\n');
     }
-    renderTerminal();
   }
 
   function handleTerminalKey(event, key) {
@@ -521,7 +675,6 @@
       event.stopPropagation();
       return true;
     }
-    renderTerminal();
     event.preventDefault();
     event.stopPropagation();
     return true;
@@ -743,18 +896,13 @@
     var s = KaDOS.getConsole();
     if (s) {
       consoleText += s; mode = 'text';
-      /* как putStr в оригинале Terminal: каждая строка вывода уходит в историю
-         и мгновенно перерисовывает сетку терминала */
-      var parts = s.split('\n');
-      for (var pi = 0; pi < parts.length; pi++) {
-        if (pi > 0) terminalHistory += '\n';
-        terminalHistory += parts[pi];
-      }
-      if (terminalIsOpen()) renderTerminal();
+      /* Инкрементальный вывод через putChar-порт (как sock.ondata -> putStr
+         в оригинале Terminal от Affe Null): без полного redraw каждый кадр,
+        символы появляются сразу. */
+      if (terminalIsOpen()) termAppend(s);
     }
     if (KaDOS.vgaDirtyConsume()) mode = 'vga';
     if (mode === 'vga') drawVga(); else drawText();
-    if (terminalIsOpen()) renderTerminal();
     if (loadError) {
       hud.textContent = loadError;
     } else if (dpadDebugMessage) {

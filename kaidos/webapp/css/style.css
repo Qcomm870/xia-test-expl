@@ -327,7 +327,10 @@ body.terminal-mode{padding:0;margin:0;align-items:stretch;justify-content:stretc
 .terminal-header{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;max-width:100%;height:28px;padding:0 6px;box-sizing:border-box;color:var(--green);font-weight:700;font-size:12px;background:#050b08}
 #terminal-close{min-height:26px;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--button);color:var(--text);font:11px monospace}
 /* Вывод — фиксированное окно сетки 20x13 как в Terminal от Affe Null: без прокрутки, строки целиком */
-#terminal-output{position:absolute;top:28px;left:0;right:0;box-sizing:border-box;margin:0;padding:4px;overflow:hidden;background:#000;color:var(--green);font:18px/1.15 "Droid Sans Mono",monospace;height:calc(100% - 28px - 42px - 16px)}
+/* Сетка как в оригинальном Terminal (Affe Null): #text 240x320, font 18px.
+   Шапка убрана из потока вывода: grid занимает всю высоту над строкой ввода,
+   ничего не перекрывает и даёт полный обзор 13 строк. */
+#terminal-output{position:absolute;top:28px;left:0;right:0;bottom:58px;box-sizing:border-box;margin:0;padding:0 4px;overflow:hidden;background:#000;color:var(--green);font-family:"Droid Sans Mono","Noto Sans Mono",monospace;font-size:16px;line-height:17px;letter-spacing:0}
 .t9-hint{position:absolute;left:0;right:0;bottom:42px;height:16px;box-sizing:border-box;padding:1px 7px;background:#04100a;color:#ffd27a;font:11px/14px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid rgba(126,243,162,0.25)}
 .terminal-prompt{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;width:100%;max-width:100%;height:42px;box-sizing:border-box;padding:4px 7px;background:#07160f;border:1px solid rgba(126,243,162,0.45);color:var(--green);font:14px/1.35 monospace}
 .prompt-mark{flex:0 0 auto}

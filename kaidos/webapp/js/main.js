@@ -20,7 +20,8 @@
   var loadError = '';
   var dpadDebugMessage = '';
   var dpadDebugToken = 0;
-  var terminalHistory = 'KaDOS local terminal\nType HELP for commands.\n';
+  /* Пустой экран при первом открытии: без баннеров, как в Terminal от Affe Null. */
+  var terminalHistory = '';
   var terminalLine = '';
   var terminalInput = document.getElementById('terminal-input');
   var terminalCommands = [];
@@ -183,14 +184,42 @@
     return panel && !panel.classList.contains('hidden');
   }
 
+  /* ===== Терминальная сетка 20x13 (порт из Terminal от Affe Null, app.js) =====
+     Вывод рендерится построчно в <pre>, как в оригинале: каждая строка — span
+     с символами-спанамми + <br>. Это даёт корректный «экран» без прокрутки и
+     без наложений. */
+  var TERM_COLS = 20;   // как maxx в оригинале (240px / 18px моноширинный)
+  var TERM_ROWS = 13;   // как maxy в оригинале (320px шапка+вывод+ввод)
+  var termGridEl = null;
+  var termLastRender = '';
+
+  function ensureTermGrid() {
+    if (!termGridEl) termGridEl = document.getElementById('terminal-output');
+    return termGridEl;
+  }
+
   function renderTerminal() {
-    var outputDisplay = document.getElementById('terminal-output');
-    if (outputDisplay) {
-      var output = (terminalHistory + consoleText).slice(-5000);
-      if (outputDisplay.textContent !== output) {
-        outputDisplay.textContent = output;
-        outputDisplay.scrollTop = outputDisplay.scrollHeight;
+    var display = ensureTermGrid();
+    if (!display) return;
+    var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (text === termLastRender) return;
+    termLastRender = text;
+    var lines = text.split('\n');
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    /* хвостовые строки видны всегда (как scroll в оригинале, но фиксированным окном) */
+    if (lines.length > TERM_ROWS) lines = lines.slice(lines.length - TERM_ROWS);
+    display.innerHTML = '';
+    for (var i = 0; i < lines.length; i++) {
+      var lineEl = document.createElement('span');
+      var line = lines[i];
+      if (line.length > TERM_COLS) line = line.slice(0, TERM_COLS);
+      for (var j = 0; j < line.length; j++) {
+        var chEl = document.createElement('span');
+        chEl.textContent = line[j];
+        lineEl.appendChild(chEl);
       }
+      display.appendChild(lineEl);
+      display.appendChild(document.createElement('br'));
     }
   }
 
@@ -256,10 +285,10 @@
   /* T9-обработчик: возвращает true, если событие перехвачено */
   function handleT9Key(event, key) {
     if (!terminalIsOpen()) return false;
-    var digitMatch = /^(?:Digit|Numpad)?([0-9])$/.exec(key || '');
     var num = null;
-    if (digitMatch) num = Number(digitMatch[1]);
-    else if (key >= '0' && key <= '9') num = Number(key);
+    if (key >= '0' && key <= '9') num = Number(key);
+    else if (/^Digit[0-9]$/.test(key || '')) num = Number(key.charAt(5));
+    else if (/^Numpad[0-9]$/.test(key || '')) num = Number(key.charAt(6));
     if (num !== null) {
       t9PressGroup(num);
       event.preventDefault();
@@ -407,6 +436,16 @@
 
   function handleTerminalKey(event, key) {
     if (!terminalIsOpen()) return false;
+    /* Fallback на keyCode (как в оригинале app.js): если normalizeKey вернул
+       служебное имя вместо символа, восстанавливаем символ из keyCode. */
+    if ((!key || key.length > 1) && typeof event.keyCode === 'number') {
+      var kc = event.keyCode;
+      if (kc >= 48 && kc <= 57) key = String(kc - 48);            // цифры
+      else if (kc >= 65 && kc <= 90) key = String.fromCharCode(kc + 32); // буквы -> нижний регистр
+      else if (kc === 13) key = 'Enter';
+      else if (kc === 8) key = 'Backspace';
+      else if (kc === 27 || kc === 17) key = 'Back';              // Esc / GoBack на KaiOS
+    }
     /* Буквы с аппаратной клавиатуры KaiOS (e.key = 'h' и т.п.) — пишем в буфер */
     if (key && key.length === 1 && /[a-zа-яё]/i.test(key)) {
       var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();

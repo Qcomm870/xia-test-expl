@@ -1,8 +1,18 @@
 #!/bin/sh
-# Требуется emsdk (Emscripten SDK). Сборка каркаса, не эмулятора.
-set -e
-emcc src/vm.c src/dos.c src/vga.c -O2 -s WASM=1 \
-  -s EXPORTED_FUNCTIONS='["_vm_load_com","_vm_step","_vga_update","_vga_buffer","_main"]' \
-  -s ALLOW_MEMORY_GROWTH=1 -o webapp/js/kados.js
-(cd webapp && zip -r ../kados.krn . )
-echo "kados.krn готов — установи Wallace Toolbox; игра запускаться НЕ будет"
+set -eu
+
+VERSION=0.2.44
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$ROOT"
+
+command -v node >/dev/null 2>&1 || { echo "Node.js is required" >&2; exit 1; }
+command -v zip >/dev/null 2>&1 || { echo "zip is required" >&2; exit 1; }
+
+node --check webapp/js/kados.js
+node --check webapp/js/loader.js
+node --check webapp/js/main.js
+node test/run.js
+
+rm -f "KaDOS-$VERSION.zip"
+(cd webapp && zip -q -r -FS "../KaDOS-$VERSION.zip" .)
+echo "KaDOS-$VERSION.zip готов (KaiOS explorer shell over JS x86 VM; не полноценный DOSBox/Fallout)"

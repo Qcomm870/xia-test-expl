@@ -3,7 +3,7 @@
   "description": "16-bit DOS prototype (demo). Fallout 2 NOT supported.",
   "launch_path": "/index.html",
   "type": "privileged",
-  "version": "0.2.5",
+  "version": "0.2.44",
   "developer": {
     "name": "kaidos-project",
     "url": "https://example.com"
@@ -26,6 +26,77 @@
   "permissions": {
     "device-storage:sdcard": {
       "access": "readwrite"
+    }
+  },
+  "activities": {
+    "open": {
+      "href": "/index.html",
+      "disposition": "window",
+      "filters": {
+        "type": [
+          "text/plain",
+          "application/octet-stream",
+          "application/x-msdos-program"
+        ],
+        "name": [
+          "*.txt",
+          "*.conf",
+          "*.cfg",
+          "*.bat",
+          "*.ini",
+          "*.asm",
+          "*.nfo",
+          "*.com",
+          "*.bin"
+        ]
+      },
+      "returnValue": true
+    },
+    "share": {
+      "href": "/index.html",
+      "disposition": "window",
+      "filters": {
+        "type": [
+          "text/plain",
+          "application/octet-stream",
+          "application/x-msdos-program"
+        ],
+        "name": [
+          "*.txt",
+          "*.conf",
+          "*.cfg",
+          "*.bat",
+          "*.ini",
+          "*.asm",
+          "*.nfo",
+          "*.com",
+          "*.bin"
+        ]
+      },
+      "returnValue": true
+    },
+    "pick": {
+      "href": "/index.html",
+      "disposition": "window",
+      "filters": {
+        "type": [
+          "text/plain",
+          "application/octet-stream",
+          "application/x-msdos-program"
+        ],
+        "name": [
+          "*.txt",
+          "*.conf",
+          "*.cfg",
+          "*.bat",
+          "*.ini",
+          "*.asm",
+          "*.nfo",
+          "*.com",
+          "*.bin"
+        ]
+      },
+      "returnValue": true
     }
   },
   "fullscreen": true,

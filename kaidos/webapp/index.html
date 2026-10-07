@@ -1,13 +1,96 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><link rel="stylesheet" href="css/style.css">
-<meta name="viewport" content="width=320, user-scalable=no">
-<title>KaDOS</title></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <link rel="stylesheet" href="css/style.css">
+  <title>KaDOS</title>
+</head>
 <body>
-<canvas id="scr" width="320" height="240"></canvas>
-<div id="hud">KaDOS loading…</div>
-<script src="js/kados.js"></script>
-<script src="js/loader.js"></script>
-<script src="js/main.js"></script>
-<script src="js/term.js"></script>
-</body></html>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="filename-window" id="current-filename" aria-live="polite">
+        <span class="brand-mark">K</span>
+        <span id="filename-label">HELLO.COM</span>
+      </div>
+      <div class="toolbar" id="toolbar">
+        <button id="edit-text" type="button">Редактировать</button>
+        <button id="open-terminal" type="button">Терминал</button>
+        <button id="open-actions" type="button" aria-label="Действия с файлом">:</button>
+        <input id="file-input" type="file" accept=".com,.bin,.txt,.conf,.cfg,.bat,.ini,.asm,.nfo,text/plain,application/octet-stream" hidden>
+      </div>
+    </header>
+
+    <div id="file-panel" class="panel hidden" aria-live="polite">
+      <div id="file-panel-header">Накопители и файлы</div>
+      <ul id="file-list"></ul>
+    </div>
+
+    <div id="editor-panel" class="panel hidden" aria-live="polite">
+      <div id="editor-header">
+        <span id="editor-filename">Редактор текста</span>
+        <button id="editor-actions-open" type="button" aria-label="Действия с файлом">:</button>
+      </div>
+      <textarea id="editor-textarea" rows="8" spellcheck="true" placeholder="Текстовый файл"></textarea>
+      <div class="editor-footer">
+        <button id="editor-save" type="button">Сохранить</button>
+        <button id="editor-close" type="button">Закрыть</button>
+      </div>
+    </div>
+
+    <div id="actions-panel" class="panel hidden" aria-label="Действия с файлом">
+      <button id="open-file-menu" type="button">Открыть</button>
+      <button id="save-file" type="button">Сохранить</button>
+      <button id="create-file" type="button">Создать файл</button>
+      <button id="save-as-file" type="button">Сохранить как...</button>
+      <button id="delete-file" type="button">Удалить файл</button>
+    </div>
+
+    <div id="delete-panel" class="panel hidden" role="dialog" aria-label="Удаление файла">
+      <div id="delete-message">Удалить выбранный файл?</div>
+      <button id="delete-confirm" type="button">Удалить</button>
+      <button id="delete-cancel" type="button">Отмена</button>
+    </div>
+
+    <div id="save-as-panel" class="panel hidden">
+      <label for="saveas-name">Имя файла</label>
+      <input id="saveas-name" type="text" autocomplete="on" spellcheck="true" value="note">
+      <div id="save-formats" aria-label="Формат файла">
+        <button type="button" data-format=".txt" class="selected">.txt</button>
+        <button type="button" data-format=".conf">.conf</button>
+        <button type="button" data-format=".cfg">.cfg</button>
+        <button type="button" data-format=".bat">.bat</button>
+        <button type="button" data-format=".ini">.ini</button>
+        <button type="button" data-format=".asm">.asm</button>
+      </div>
+      <button id="saveas-confirm" type="button">Сохранить как</button>
+    </div>
+
+    <div id="save-status-panel" class="panel hidden" role="dialog" aria-live="polite" aria-label="Статус сохранения">
+      <div id="save-status-message">Файл был сохранен</div>
+      <button id="save-status-ok" type="button">ОК</button>
+    </div>
+
+    <section id="terminal-panel" class="panel hidden" aria-label="Терминал KaDOS" tabindex="-1">
+      <header class="terminal-header">
+        <span>KaDOS Terminal</span>
+        <button id="terminal-close" type="button">Закрыть</button>
+      </header>
+      <pre id="terminal-output" aria-live="polite"></pre>
+      <form id="terminal-form" class="terminal-prompt">
+        <label for="terminal-input">&gt;</label>
+        <input id="terminal-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+      </form>
+    </section>
+
+    <main class="screen-shell">
+      <canvas id="scr" width="320" height="240" tabindex="0" aria-label="Экран эмулятора"></canvas>
+      <div id="hud">KaDOS loading…</div>
+    </main>
+  </div>
+
+  <script src="js/kados.js"></script>
+  <script src="js/loader.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

@@ -317,17 +317,20 @@ body{
   text-shadow:0 0 8px rgba(126,243,162,0.3);
 }
 
+/* Терминал занимает весь экран в стандартной (портретной) ориентации Nokia: 240x320 */
 #terminal-panel{position:fixed;top:0;left:0;right:auto;bottom:auto;width:240px;height:320px;max-width:100vw;max-height:100vh;display:block;padding:0;border:0;border-radius:0;z-index:9999;overflow:hidden;background:#050b08}
 .app-shell.terminal-mode{position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100vh;max-height:none;max-width:none;border:0;border-radius:0;overflow:visible}
 .app-shell.terminal-mode .topbar,.app-shell.terminal-mode .screen-shell{display:none}
 body.terminal-mode{padding:0;align-items:stretch;justify-content:stretch}
-.terminal-header{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;gap:8px;width:240px;max-width:100%;height:30px;color:var(--green);font-weight:700}
-#terminal-close{min-height:32px;padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:var(--button);color:var(--text);font:12px monospace}
-#terminal-output{position:absolute;top:30px;left:0;display:block;width:100%;height:auto;max-height:none;min-height:0;box-sizing:border-box;margin:0;padding:4px;overflow-y:scroll;overflow-x:hidden;white-space:pre-wrap;overflow-wrap:anywhere;background:#000;color:var(--green);font:18px/1.2 "Droid Sans Mono",monospace;bottom:48px}
-.terminal-prompt{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:7px;width:240px;max-width:100%;min-height:42px;box-sizing:border-box;padding:4px 7px;background:#07160f;border:1px solid rgba(126,243,162,0.45);color:var(--green);font:14px/1.35 monospace}
-.terminal-prompt label{flex:0 0 auto}
-#terminal-input{flex:1;min-width:0;min-height:30px;padding:3px 0;border:0;outline:0;background:transparent;color:var(--text);font:16px/1.35 monospace;caret-color:var(--green)}
-#terminal-input:focus{outline:0}
+.terminal-header{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;gap:8px;width:240px;max-width:100%;height:28px;padding:0 6px;box-sizing:border-box;color:var(--green);font-weight:700;font-size:12px}
+#terminal-close{min-height:26px;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--button);color:var(--text);font:11px monospace}
+#terminal-output{position:absolute;top:28px;left:0;right:0;display:block;width:100%;height:auto;max-height:none;min-height:0;box-sizing:border-box;margin:0;padding:4px;overflow-y:scroll;overflow-x:hidden;white-space:pre-wrap;overflow-wrap:anywhere;background:#000;color:var(--green);font:13px/1.25 "Droid Sans Mono",monospace;bottom:70px}
+.t9-hint{position:absolute;left:0;right:0;bottom:42px;height:16px;box-sizing:border-box;padding:1px 7px;background:#04100a;color:#ffd27a;font:11px/14px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid rgba(126,243,162,0.25)}
+.terminal-prompt{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;width:240px;max-width:100%;height:42px;box-sizing:border-box;padding:4px 7px;background:#07160f;border:1px solid rgba(126,243,162,0.45);color:var(--green);font:14px/1.35 monospace}
+.prompt-mark{flex:0 0 auto}
+.t9-buffer{flex:1;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text);font:14px/1.35 monospace}
+.t9-caret{color:var(--green-strong);animation:terminal-blink 1s steps(1) infinite}
+#terminal-input{position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;background:transparent;color:transparent;font-size:16px}
 @keyframes terminal-blink{to{visibility:hidden}}
 
 @media (max-width: 360px) {

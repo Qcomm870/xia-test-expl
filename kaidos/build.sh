@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION=0.2.44
+VERSION=0.2.45
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
 

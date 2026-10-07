@@ -26,6 +26,100 @@
   var terminalCommands = [];
   var terminalHistoryIndex = 0;
   var terminalHistoryDraft = '';
+
+  /* ===== T9 multi-tap ввод (как в Terminal от Affe Null) ===== */
+  var t9Keys = [
+    [' ', '0'],
+    ['.', ',', '?', '!', '1', ';', ':', '/', '@', '-', '+', '_', '=', '$', '|', '<', '>'],
+    ['a', 'b', 'c', '2'],
+    ['d', 'e', 'f', '3'],
+    ['g', 'h', 'i', '4'],
+    ['j', 'k', 'l', '5'],
+    ['m', 'n', 'o', '6'],
+    ['p', 'q', 'r', 's', '7'],
+    ['t', 'u', 'v', '8'],
+    ['w', 'x', 'y', 'z', '9']
+  ];
+  var t9Key = -1;            // индекс текущей клавиши-группы
+  var t9Index = 0;           // индекс символа внутри группы
+  var t9Timer = null;        // задержка «добора» символа
+  var t9Upper = false;       // переключатель регистра (#)
+  var t9Control = false;     // режим Ctrl (Call)
+  var t9BufferEl = document.getElementById('t9-buffer');
+  var t9CaretEl = document.getElementById('t9-caret');
+  var t9HintEl = document.getElementById('t9-hint');
+
+  function t9CommittedText() {
+    return t9BufferEl ? t9BufferEl.textContent.replace(/\|$/, '') : terminalLine;
+  }
+
+  function t9Render() {
+    if (!t9BufferEl || !t9CaretEl) return;
+    var text = t9CommittedText();
+    var pending = '';
+    if (t9Key >= 0) {
+      var ch = t9Keys[t9Key][t9Index];
+      pending = /[a-z]/.test(ch) && t9Upper ? ch.toUpperCase() : ch;
+    }
+    t9BufferEl.textContent = text + pending;
+    t9BufferEl.appendChild(t9CaretEl);
+    if (t9HintEl) {
+      var mode = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
+      var options = t9Key >= 0 ? t9Keys[t9Key].join(' ') : '';
+      t9HintEl.textContent = mode + (options ? ' | ' + options : '');
+    }
+    terminalLine = text + pending;
+    if (terminalInput) terminalInput.value = terminalLine;
+  }
+
+  function t9Commit() {
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    if (t9Key < 0) return;
+    var text = t9CommittedText();
+    var ch = t9Keys[t9Key][t9Index];
+    if (/[a-z]/.test(ch)) {
+      if (t9Control) ch = String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 0x40);
+      else if (t9Upper) ch = ch.toUpperCase();
+    }
+    text += ch;
+    if (t9BufferEl) t9BufferEl.textContent = text;
+    t9Key = -1;
+    t9Index = 0;
+    t9Control = false;
+    t9Render();
+  }
+
+  function t9PressGroup(groupIndex) {
+    if (t9Key === groupIndex) {
+      t9Index = (t9Index + 1) % t9Keys[groupIndex].length;
+    } else {
+      if (t9Key >= 0) t9Commit();
+      t9Key = groupIndex;
+      t9Index = 0;
+    }
+    t9Render();
+    if (t9Timer) clearTimeout(t9Timer);
+    t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+  }
+
+  function t9Backspace() {
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    if (t9Key >= 0) { t9Key = -1; t9Index = 0; t9Render(); return; }
+    var text = t9CommittedText();
+    if (text.length) {
+      if (t9BufferEl) t9BufferEl.textContent = text.slice(0, -1);
+      t9Render();
+    }
+  }
+
+  function t9Submit() {
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9Commit();
+    var command = t9CommittedText();
+    if (t9BufferEl) t9BufferEl.textContent = '';
+    t9Render();
+    submitTerminalLine(command);
+  }
   var filePanel = document.getElementById('file-panel');
   var fileList = document.getElementById('file-list');
   var fileSelected = -1;
@@ -148,14 +242,67 @@
     }
   }
 
-  function submitTerminalLine() {
-    var command = terminalInput ? terminalInput.value : terminalLine;
+  function submitTerminalLine(forcedCommand) {
+    var command = typeof forcedCommand === 'string' ? forcedCommand
+      : (terminalInput ? terminalInput.value : terminalLine);
     terminalLine = '';
     if (terminalInput) terminalInput.value = '';
     if (command.trim()) terminalCommands.push(command);
     terminalHistoryIndex = terminalCommands.length;
     terminalHistoryDraft = '';
     runTerminalCommand(command);
+  }
+
+  /* T9-обработчик: возвращает true, если событие перехвачено */
+  function handleT9Key(event, key) {
+    if (!terminalIsOpen()) return false;
+    var digitMatch = /^(?:Digit|Numpad)?([0-9])$/.exec(key || '');
+    var num = null;
+    if (digitMatch) num = Number(digitMatch[1]);
+    else if (key >= '0' && key <= '9') num = Number(key);
+    if (num !== null) {
+      t9PressGroup(num);
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+    if (key === 'Backspace') {
+      event.preventDefault();
+      event.stopPropagation();
+      t9Backspace();
+      return true;
+    }
+    if (key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      t9Submit();
+      return true;
+    }
+    if (key === '#') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (t9Key >= 0) t9Commit();
+      t9Upper = !t9Upper;
+      t9Render();
+      return true;
+    }
+    if (key === 'Call') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (t9Key >= 0) t9Commit();
+      t9Control = !t9Control;
+      t9Render();
+      return true;
+    }
+    if (key === 'SoftLeft') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (t9Key >= 0) t9Commit();
+      if (t9BufferEl) t9BufferEl.textContent = t9CommittedText() + ' ';
+      t9Render();
+      return true;
+    }
+    return false; // стрелки и прочее — обычная обработка (история команд)
   }
 
   function terminalHistoryMove(direction) {
@@ -165,12 +312,13 @@
     }
     var result = window.KaLoader.navigateCommandHistory(terminalCommands, terminalHistoryIndex, direction);
     terminalHistoryIndex = result.index;
-    terminalLine = terminalHistoryIndex === terminalCommands.length ? terminalHistoryDraft : result.command;
-    if (terminalInput) {
-      terminalInput.value = terminalLine;
-      terminalInput.focus();
-      terminalInput.setSelectionRange(terminalInput.value.length, terminalInput.value.length);
-    }
+    var command = terminalHistoryIndex === terminalCommands.length ? terminalHistoryDraft : result.command;
+    /* показываем выбранную историю прямо в видимый T9-буфер */
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9Key = -1;
+    t9Index = 0;
+    if (t9BufferEl) t9BufferEl.textContent = command || '';
+    t9Render();
     renderTerminal();
   }
 
@@ -258,11 +406,11 @@
   }
 
   function handleTerminalKey(event, key) {
-    if (!terminalIsOpen() || event.target !== terminalInput) return false;
+    if (!terminalIsOpen()) return false;
+    /* T9 multi-tap: цифры, Backspace, Enter, #, Call, SoftLeft */
+    if (handleT9Key(event, key)) return true;
     if (key === 'ArrowUp' || key === 'ArrowDown') {
       terminalHistoryMove(key);
-    } else if (key === 'Enter') {
-      submitTerminalLine();
     } else if (key === 'Back' || key === 'Escape' || key === 'SoftRight') {
       closeTerminal();
     } else {
@@ -637,7 +785,7 @@
   window.addEventListener('keydown', function (e) {
     var key = normalizeKey(e);
     if (handleTerminalKey(e, key)) return;
-    if (terminalIsOpen() && e.target === terminalInput) return;
+    if (terminalIsOpen()) return; // в терминале всё перехватывает T9/история
     var active = document.activeElement;
     var isTextField = active && /^(INPUT|TEXTAREA)$/.test(active.tagName);
     var mappedKey = fileListDirectionalKey(key);
@@ -936,16 +1084,23 @@
       updateTerminalViewport();
       setTerminalOrientation(true);
       renderTerminal();
+      t9Render();
       setTimeout(function () {
-        if (terminalIsOpen() && terminalInput) terminalInput.focus();
+        /* фокус на скрытом поле: клавиши доходят до window.keydown, IME не мешает */
+        if (terminalIsOpen() && terminalInput) {
+          try { terminalInput.focus({ preventScroll: true }); } catch (err) { terminalInput.focus(); }
+        }
       }, 0);
     });
 
     bindPointerAction(document.getElementById('terminal-close'), closeTerminal);
 
     if (terminalInput) {
+      /* защита от авто-подстановок браузера: буфер T9 — единственный источник истины */
       terminalInput.addEventListener('input', function () {
-        terminalLine = terminalInput.value;
+        if (t9Key < 0 && terminalInput.value !== terminalLine) {
+          terminalInput.value = terminalLine;
+        }
       });
     }
     window.addEventListener('resize', updateTerminalViewport);
@@ -954,7 +1109,7 @@
     if (terminalForm) {
       terminalForm.addEventListener('submit', function (event) {
         event.preventDefault();
-        submitTerminalLine();
+        t9Submit();
       });
     }
 

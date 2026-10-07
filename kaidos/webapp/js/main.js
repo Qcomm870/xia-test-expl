@@ -82,6 +82,38 @@
     return group[index % group.length];
   }
 
+  /* v0.2.66: строка ввода живёт в самой putChar-сетке (после промпта), как в
+     оригинальном Terminal (Affe Null) — отдельная нижняя панель с дублем
+     буфера убрана из index.html, чтобы не перекрывать обзор. Каретка —
+     персонажный символ '_' на месте курсора движка: ставится/снимается
+     точечно через DOM-ячейку (setCellAt), без перерисовки всей сетки. */
+  var CARET_CH = '\u0001';   // служебный код: рисуем '_', движок его не печатает
+  var caretCell = null;      // DOM-ячейка под кареткой (для восстановления)
+  var caretSaved = ' ';
+
+  function termCellEl(x, y) {
+    if (!termEngine || !termEngine.cellAt) return null;
+    return termEngine.cellAt(x, y);
+  }
+
+  function placeCaret() {
+    removeCaret();
+    if (!terminalIsOpen() || !termEngine) return;
+    var c = termEngine.getCursor();
+    var el = termCellEl(c.x, c.y);
+    if (!el) return;
+    caretCell = el;
+    caretSaved = el.textContent || ' ';
+    el.textContent = '_';
+  }
+
+  function removeCaret() {
+    if (caretCell) {
+      try { caretCell.textContent = caretSaved === CARET_CH ? ' ' : caretSaved; } catch (e) {}
+      caretCell = null;
+    }
+  }
+
   /* v0.2.65: очистка строки ввода в putChar-сетке (аналог посимвольного
      backspace из оригинала, где telnet-эхо сервера зирало каждый '\\b').
      У нас эха нет — eraseBack() затирает ячейку явно. terminalLine включает
@@ -119,29 +151,13 @@
   }
 
   function t9Render() {
-    /* v0.2.58: терминальный ввод живёт ТОЛЬКО в putChar-сетке (терминальная
-       область, как в оригинале Terminal от Affe Null). Строка terminalLine —
-       источник истины; нижняя строка t9-buffer/hud показывает её копию, а не
-       второй вывод. Pending-группа НЕ показывается отдельным «[f]» — символ
-       уже напечатан в сетке и циклически заменяется там же. */
-    var visible = terminalLine;
+    /* v0.2.66: ввод живёт ТОЛЬКО в putChar-сетке (как в оригинале Affe Null).
+       Нижняя панель-дубль (t9-buffer/hud-строка) убрана из index.html — она
+       перекрывала обзор и показывала то же самое второй раз. Здесь только:
+       скрытое поле для IME + каретка '_' на позиции курсора движка. */
     syncHiddenInput();
-    if (t9BufferEl && t9CaretEl) {
-      var node = document.createTextNode(visible);
-      while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild);
-      t9BufferEl.appendChild(node);
-      t9BufferEl.appendChild(t9CaretEl);
-    }
-    if (t9HintEl) {
-      var modeStr = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
-      var options = t9Key >= 0 && t9Keys[t9Key] ? t9Keys[t9Key].join(' ') : '';
-      t9HintEl.textContent = modeStr + (options ? ' | ' + options : '');
-    }
     if (terminalInput) terminalInput.value = terminalLine;
-    /* hud-дублирование строки ввода только когда терминал ОТКРЫТ — иначе
-       каждый кадр loop() затирал статус эмулятора и «съедал» вывод. */
-    if (hud && terminalIsOpen()) hud.textContent = '>' + (visible || ' ') + ' [' +
-      (t9Control ? 'CTRL ' : '') + (t9Upper ? 'ABC' : 'abc') + ']';
+    placeCaret();
   }
 
   function t9SetText(text) {
@@ -173,6 +189,7 @@
 
   /* Единственная точка печати ввода (аналог sock.send в оригинале). */
   function t9SendRaw(ch) {
+    removeCaret();                       // каретка не должна мешать putChar
     termPrint(ch);                       // putChar-сетка — единственный вывод
     if (ch !== '\b') terminalLine += ch; // история строки для Enter/CLS
   }
@@ -182,6 +199,7 @@
      эха нет, поэтому замена символа требует явной затирки ячейки перед
      печатью нового — иначе старый символ остаётся под новым. */
   function t9EraseCell() {
+    removeCaret();
     if (termEngine && termEngine.eraseBack) termEngine.eraseBack();
   }
 
@@ -249,18 +267,32 @@
     /* таймер фиксирует конец группы (sendTimeoutId=setTimeout(send,1000)
        в оригинале): через секунду следующее нажатие начнёт НОВЫЙ символ. */
     t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    /* v0.2.66: старт long-press цикла — листает группу, пока кнопка удержана */
+    t9StartHold(groupIndex);
     t9Render();
   }
 
-  /* v0.2.65: УДАЛЁН long-press цикл (t9StartHold/t9StopHold из v0.2.64).
-     Именно он был причиной «вводится первая буква»: локальный setInterval
-     крутил группу a->b->c независимо от пользователя, и если удержание
-     длилось дольше тика — к моменту отпускания символ уже «убегал», а при
-     коротком нажатии всегда оставалась ПЕРВАЯ буква группы. В оригинальном
-     Terminal от Affe Null никакого удержания нет: только быстрые повторные
-     нажатия той же клавиши (currentKey==num -> index+1 % len) и таймер
-     подтверждения 1000 мс. Делаем ровно так же — см. t9PressGroup. */
-  function t9StopHold() { /* no-op (обратная совместимость вызовов) */ }
+  /* v0.2.66: ВОССТАНОВЛЕН long-press цикл — но теперь он работает как в
+     настоящем Nokia multi-tap. Причина жалоб «надо задерживать кнопку, и то
+     вводится первая буква»: KaiOS при удержании НЕ шлёт keydown.repeat,
+     поэтому без локального цикла было нечем листать группу. Цикл 300мс
+     сдвигает индекс (a->b->c...) и печатает символ ЗАМЕНой на месте
+     (eraseBack + putChar), как telnet-эхо в оригинале Affe Null.
+     Остановка: keyup (см. обработчик keyup), Enter/Backspace/#/Call. */
+  var t9HoldInterval = null;
+  function t9StartHold(groupIndex) {
+    t9StopHold();
+    t9HoldInterval = setInterval(function () {
+      if (!terminalIsOpen() || t9Key !== groupIndex) { t9StopHold(); return; }
+      t9AdvanceGroup(groupIndex);
+      /* продлеваем commit-таймер, чтобы группа не закрылась во время удержания */
+      if (t9Timer) clearTimeout(t9Timer);
+      t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    }, 300);
+  }
+  function t9StopHold() {
+    if (t9HoldInterval) { clearInterval(t9HoldInterval); t9HoldInterval = null; }
+  }
 
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
@@ -386,17 +418,21 @@
   function renderTerminalFull() {
     ensureTermGrid();
     if (!termEngine) return;
+    removeCaret();                       // reset пересоздаёт DOM-ячейки
     termEngine.reset();
     var text = terminalHistory.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     termEngine.putStr(text);
     /* если идёт набор группы — эхо строки ввода уже в истории; ничего не
        допечатываем */
     termCharsOk = true;
+    placeCaret();                        // каретка после восстановленной строки
   }
 
   function termEngineResetAndPrompt() {
+    removeCaret();
     if (termEngine && termEngine.reset) termEngine.reset();
     termPrint(TERM_PROMPT);
+    placeCaret();
   }
 
   var termCharsOk = false;   // сетка реально создана (движок пишет в DOM)
@@ -404,9 +440,22 @@
   function termAppend(text) {
     if (!text) return;
     var norm = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    terminalHistory += norm;
+    /* v0.2.66: история должна повторять поведение движка putChar — раньше
+       '\\b' просто конкатенировался в terminalHistory, и renderTerminalFull()
+       при перерисовке печатал backspace-мусор (сдвиги, дырки в тексте).
+       Теперь: '\\b' затирает последний символ истории (как eraseBack в сетке),
+       простой моделью: backspace удаляет предшествующий символ. */
+    for (var hi = 0; hi < norm.length; hi++) {
+      var hch = norm.charAt(hi);
+      if (hch === '\b') terminalHistory = terminalHistory.slice(0, -1);
+      else terminalHistory += hch;
+    }
     ensureTermGrid();
-    if (termEngine) { termEngine.putStr(norm); termCharsOk = true; }
+    if (termEngine) {
+      removeCaret();                     // вывод затрёт ячейку под кареткой
+      termEngine.putStr(norm);
+      termCharsOk = true;
+    }
   }
 
   /* Единый путь вывода: движок оригинала + копия в terminalHistory
@@ -423,6 +472,7 @@
   }
 
   function closeTerminal() {
+    removeCaret();                       // каретка видна только в терминале
     var panel = document.getElementById('terminal-panel');
     if (panel) {
       panel.classList.add('hidden');
@@ -490,11 +540,13 @@
        уже напечатаны в putChar-сетку по мере нажатия клавиш (t9SendRaw),
        поэтому здесь НЕ печатаем "> команда" целиком (иначе дубль).
        Печатаем только перевод строки перед выводом результата. */
+    removeCaret();                       // каретка мешала бы '\n'
     termPrint('\n');
     runTerminalCommand(command, true);
     /* v0.2.63: как промпт "bash-4.2$ " в оригинале — после вывода команды
        всегда печатается приглашение для следующей строки */
     termPrint(TERM_PROMPT);
+    placeCaret();                        // каретка на новую строку ввода
   }
 
   /* T9-обработчик: возвращает true, если событие перехвачено.
@@ -516,8 +568,11 @@
       else if (kcd >= 96 && kcd <= 105) num = kcd - 96;         // Numpad
     }
     if (num !== null) {
-      /* v0.2.65: точная модель оригинала Affe Null — только multi-tap
-         повторными нажатиями; никакого удержания/автоповтора. */
+      /* v0.2.66: модель оригинала Affe Null (multi-tap повторными нажатиями,
+         commit-таймер 1000мс) + локальный long-press цикл: KaiOS при удержании
+         не шлёт keydown.repeat, поэтому группу листает t9StartHold (стартует
+         здесь, останавливается по keyup). Символ печатается заменой на месте,
+         так что «задержал кнопку» -> a->b->c и остаётся нужная буква. */
       t9PressGroup(num);
       event.preventDefault();
       event.stopPropagation();
@@ -581,13 +636,14 @@
        входит в terminalLine (t9SendRaw печатает его и добавляет в строку),
        поэтому лишняя затирка съедала предыдущий символ. */
     var eraseLen = terminalLine.length;
+    removeCaret();                       // затирка строки — без каретки
     for (var bi = 0; bi < eraseLen; bi++) termPrint('\b');
     t9Key = -1;
     t9Index = 0;
     terminalLine = '';
     termPrint(command || '');
     terminalLine = command || '';
-    t9Render();
+    t9Render();                          // внутри поставит каретку
   }
 
   /* (v0.2.53) Старый termPrint удалён — единый рендер вывода выше

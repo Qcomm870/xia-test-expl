@@ -634,8 +634,6 @@
 
   function loop() {
     if (!window.KaDOS) { setTimeout(loop, 100); return; }
-    // Режим терминала: VM и консоль принадлежат KaDOSTerm — не мешаем.
-    if (window.KaDOSTerm) { setTimeout(loop, 250); return; }
     var out = KaDOS.runSlice(BUDGET);
     var s = KaDOS.getConsole();
     if (s) { consoleText += s; mode = 'text'; }

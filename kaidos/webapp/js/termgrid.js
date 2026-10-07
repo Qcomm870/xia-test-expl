@@ -143,6 +143,17 @@
       }
     }
 
+    /* Стирание символа перед кареткой: '\b' в putChar оригинала сдвигает
+     * каретку назад, но НЕ затирает ячейку (стирание делает telnet-эхо
+     * сервера). У KaDOS эха нет — для multi-tap замены (a->b->c) и Backspace
+     * нужна явная затирка. Возвращает true, если что-то было стёрто. */
+    function eraseBack() {
+      if (curx === 0) return false;
+      curx--;
+      setChar(curx, cury, ' ');
+      return true;
+    }
+
     function newLineAt(line) {
       if (!chars[line + 1]) return;
       var elCurrentLine = chars[line][0].parentElement;
@@ -228,6 +239,7 @@
       putStr: putStr,
       reset: reset,
       clear: reset,
+      eraseBack: eraseBack,
       getCursor: function () { return { x: curx, y: cury }; },
       MAXX: maxx,
       MAXY: maxy

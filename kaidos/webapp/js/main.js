@@ -22,6 +22,11 @@
   var dpadDebugToken = 0;
   /* Пустой экран при первом открытии: без баннеров, как в Terminal от Affe Null. */
   var terminalHistory = '';
+  /* v0.2.63: приглашение терминала в стиле оригинального Terminal от Affe Null
+     (у него был telnet-сервер и bash-промпт "bash-4.2$ "; у нас локальная
+     DOS-консоль KaDOS — промпт "root@kaios:~# "). Никакого баннера
+     "Welcome to KaDOS" больше нет — экран при открытии чистый, как в оригинале. */
+  var TERM_PROMPT = 'root@kaios:~# ';
   var terminalLine = '';
   var terminalInput = document.getElementById('terminal-input');
   var terminalCommands = [];
@@ -43,7 +48,7 @@
   ];
   var t9Key = -1;            // индекс текущей клавиши-группы
   var t9Index = 0;           // индекс символа внутри группы
-  var t9Timer = null;        // задержка «добора» символа
+  var t9Timer = null;        // задержка «добора» символа (как sendTimeoutId=setTimeout(send,1000) в оригинале)
   var t9Upper = false;       // переключатель регистра (#)
   var t9Control = false;     // режим Ctrl (Call)
   var t9BufferEl = document.getElementById('t9-buffer');
@@ -152,10 +157,18 @@
     if (ch !== '\b') terminalLine += ch; // история строки для Enter/CLS
   }
 
-  /* Замена последнего символа в сетке: '\b' затирает, затем печать нового
-     (ровно то, что делает оригинал при повторном нажатии клавиши). */
+  /* ВАЖНО (исправление v0.2.63): putChar оригинала при '\b' сдвигает каретку
+     НАЗАД, но НЕ затирает ячейку (стирание делает сервер своим эхом). У нас
+     эха нет, поэтому замена символа требует явной затирки ячейки перед
+     печатью нового — иначе старый символ остаётся под новым. */
+  function t9EraseCell() {
+    if (termEngine && termEngine.eraseBack) termEngine.eraseBack();
+  }
+
+  /* Замена последнего символа в сетке: затереть ячейку, затем печать нового
+     (аналог send() в оригинале, где telnet-эхо перерисовывает позицию). */
   function t9ReplaceLast(ch) {
-    t9SendRaw('\b');
+    t9EraseCell();
     t9SendRaw(ch);
     terminalLine = terminalLine.slice(0, -1) + ch;
   }
@@ -190,29 +203,32 @@
   /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
   function t9PressGroup(groupIndex, isRepeat) {
     var now = Date.now();
-    /* защита от двойных событий: если repeat просочился без флага, но между
-       keydown прошло <35мс — считаем это автоповтором, а не новым нажатием */
-    var treatedAsRepeat = !!isRepeat || (t9Key === groupIndex && now - lastT9DownAt < 35);
-    lastT9DownAt = now;
+    /* ВАЖНОЕ УПРОЩЕНИЕ v0.2.63: раньше здесь была эвристика «repeat по
+       интервалу <35мс», которая ломала обычный multi-tap: быстрое повторное
+       нажатие той же клавиши тоже попадало в неё, и символ улетал дальше по
+       группе без ведома пользователя — при отпускании оставалась НЕ та буква,
+       на которой остановились. В ОРИГИНАЛЕ (app.js Affe Null) никакой
+       детекции повторов нет вообще: каждое keydown = сдвиг индекса группы
+       (currentKey==num -> index+1 % len), подтверждение — только таймером
+       1000 мс или Enter/Backspace/#/Call/SoftLeft. Делаем ровно так же. */
+    void isRepeat; void now;
     var group = t9Keys[groupIndex] || [String(groupIndex)];
-    if (treatedAsRepeat && t9Key === groupIndex) {
-      /* автоповтор удержания ИЛИ повторное быстрое нажатие: цикл по группе,
-         замена символа на месте в putChar-сетке */
-      t9AdvanceGroup(groupIndex);
-    } else if (t9Key === groupIndex && terminalLine.length) {
-      /* медленное повторное нажатие той же клавиши — тоже цикл по группе */
-      t9AdvanceGroup(groupIndex);
+    if (t9Key === groupIndex) {
+      /* повторное нажатие ТОЙ ЖЕ клавиши до истечения таймера: цикл по группе,
+         замена символа на месте в putChar-сетке (a->b->c->a...) */
+      t9Index = (t9Index + 1) % group.length;
+      t9ReplaceLast(t9ApplyCase(group[t9Index]));
     } else {
-      /* первое нажатие новой клавиши: символ печатается СРАЗУ, как telnetSend
-         в onkeydown оригинала — буква видна немедленно, без скобок и дублей */
+      /* первая печать новой клавиши: символ сразу виден (как telnetSend в
+         onkeydown оригинала); если была открыта старая группа — она просто
+         фиксируется (символ уже напечатан, backspace не нужен) */
       t9Key = groupIndex;
       t9Index = 0;
       t9SendRaw(t9ApplyCase(t9CharFor(groupIndex, 0)));
     }
     if (t9Timer) clearTimeout(t9Timer);
-    /* таймер фиксирует конец группы: следующее нажатие ДРУГОЙ клавиши
-       начнёт новый символ, а не будет заменять этот. При активном удержании
-       (repeat-события идут каждые ~30-60мс) таймер просто перезапускается. */
+    /* таймер фиксирует конец группы (sendTimeoutId=setTimeout(send,1000)
+       в оригинале): через секунду следующее нажатие начнёт НОВЫЙ символ. */
     t9Timer = setTimeout(function () { t9Commit(); }, 1000);
     t9Render();
   }
@@ -220,16 +236,18 @@
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     if (t9Key >= 0) {
-      /* как в оригинале: пока идёт набор группы, Backspace ПРОСТО ОТМЕНЯЕТ
-         её (clearTimeout, currentKey=-1) — если символ уже был послан в
-         сетку, стираем его '\b' */
-      t9SendRaw('\b');                   // отменить группу: стереть символ из сетки
+      /* как в оригинале: пока идёт набор группы, Backspace ОТМЕНЯЕТ её
+         (clearTimeout, currentKey=-1); символ уже напечатан в сетку —
+         стираем его затиркой ячейки */
+      t9EraseCell();
+      terminalLine = terminalLine.slice(0, -1);
       t9Key = -1; t9Index = 0; t9Render(); return;
     }
-    /* нет активного pending — отправляем '\b' серверу (терминалу): стирает
-       последний символ строки ввода в putChar-сетке */
+    /* нет активного pending — стереть последний символ строки ввода:
+       каретка назад + затирка ячейки (у нас нет telnet-эха, см. выше) */
     if (terminalLine.length) {
-      t9SendRaw('\b');
+      termPrint('\b');
+      t9EraseCell();
       terminalLine = terminalLine.slice(0, -1);
       t9Render();
     }
@@ -419,6 +437,9 @@
        Печатаем только перевод строки перед выводом результата. */
     termPrint('\n');
     runTerminalCommand(command, true);
+    /* v0.2.63: как промпт "bash-4.2$ " в оригинале — после вывода команды
+       всегда печатается приглашение для следующей строки */
+    termPrint(TERM_PROMPT);
   }
 
   /* T9-обработчик: возвращает true, если событие перехвачено.
@@ -553,7 +574,8 @@
     } else if (name === 'CLS') {
       terminalHistory = '';
       consoleText = '';
-      renderTerminal();
+      /* как в оригинальном Terminal: после очистки остаётся только приглашение */
+      termPrint(TERM_PROMPT);
     } else if (name === 'EXIT') {
       closeTerminal();
       return;
@@ -1085,17 +1107,12 @@
   }
 
   window.addEventListener('keydown', function (e) {
-    /* v0.2.60: удержание кнопки на Nokia 800 Tough. KaiOS/Gecko при долгом
-       нажатии может слать серию keydown либо с e.repeat=true, либо БЕЗ него
-       (древние сборки), а иногда и дубли keydown+keypress. Флаг repeat здесь
-       — единственная надёжная подсказка; если его нет, t9PressGroup сам
-       распознаёт автоповтор по интервалу <35мс между событиями той же
-       клавиши. Без этого цикла любое «зажатие» печатало только первую букву
-       группы (a вместо f). */
-    if (terminalIsOpen() && typeof e.keyCode === 'number' &&
-        ((e.keyCode >= 48 && e.keyCode <= 57) || (e.keyCode >= 96 && e.keyCode <= 105))) {
-      if (!e.repeat) e.__kadosRepeatGuess = true; // пусть t9PressGroup проверит интервал
-    }
+    /* v0.2.63: эвристика автоповтора (<35мс) УДАЛЕНА — она ломала обычный
+       multi-tap (быстрые повторные нажатия той же клавиши «улетали» дальше по
+       группе, и при отпускании оставалась не та буква). В оригинальном
+       Terminal от Affe Null никакого детектирования повторов нет: каждое
+       keydown просто сдвигает индекс группы, подтверждение — таймером 1000мс.
+       Теперь t9PressGroup делает ровно то же самое. */
     var key = normalizeKey(e);
     if (handleTerminalKey(e, key)) return;
     if (terminalIsOpen()) return; // в терминале всё перехватывает T9/история
@@ -1401,6 +1418,9 @@
       updateTerminalViewport();
       setTerminalOrientation(true);
       renderTerminal();
+      /* v0.2.63: при первом открытии — чистый экран с промптом как в
+         оригинальном Terminal (никакого "Welcome to KaDOS") */
+      if (!terminalHistory) termPrint(TERM_PROMPT);
       t9Render();
       setTimeout(function () {
         /* фокус на скрытом поле: клавиши доходят до window.keydown, IME не мешает */

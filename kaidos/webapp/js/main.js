@@ -61,10 +61,19 @@
     return out;
   }
 
+  /* Т9-раскладка Affe Null (terminal от OmniSD) построена по НОМЕРАМ клавиш:
+     keys[0]=' ', keys[1]= punct+цифры, keys[2..9] = буквы на клавишах 2..9.
+     В оригинале символ выбирается как keys[num][index], где num — цифра клавиши. */
+  function t9CharFor(num, index) {
+    var group = t9Keys[num];
+    if (!group) return String(num);
+    return group[index % group.length];
+  }
+
   function t9VisiblePending() {
     if (t9Key < 0) return '';
-    var ch = t9Keys[t9Key][t9Index];
-    if (/[a-z]/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
+    var ch = t9CharFor(t9Key, t9Index);
+    if (/^[a-z]$/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
     return '[' + ch + ']';
   }
 
@@ -92,7 +101,7 @@
     t9BufferEl.appendChild(t9CaretEl);
     if (t9HintEl) {
       var mode = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
-      var options = t9Key >= 0 ? t9Keys[t9Key].join(' ') : '';
+      var options = t9Key >= 0 && t9Keys[t9Key] ? t9Keys[t9Key].join(' ') : '';
       t9HintEl.textContent = mode + (options ? ' | ' + options : '');
     }
     terminalLine = text;
@@ -115,8 +124,8 @@
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     if (t9Key < 0) return;
     var text = t9CommittedText();
-    var ch = t9Keys[t9Key][t9Index];
-    if (/[a-z]/.test(ch)) {
+    var ch = t9CharFor(t9Key, t9Index);
+    if (/^[a-z]$/.test(ch)) {
       if (t9Control) ch = String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 0x40);
       else if (t9Upper) ch = ch.toUpperCase();
     }
@@ -128,9 +137,11 @@
     t9Render();
   }
 
+  /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
   function t9PressGroup(groupIndex) {
+    var group = t9Keys[groupIndex] || [String(groupIndex)];
     if (t9Key === groupIndex) {
-      t9Index = (t9Index + 1) % t9Keys[groupIndex].length;
+      t9Index = (t9Index + 1) % group.length;
     } else {
       if (t9Key >= 0) t9Commit();
       t9Key = groupIndex;
@@ -318,11 +329,35 @@
     for (var i = 0; i < TERM_ROWS; i++) termNewLine();
     var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     termPutStr(text);
+    /* сброс флага инкрементального вывода: вся история уже отрисована,
+       иначе next loop() напечатает consoleText повторно поверх истории */
+    lastEmuConsoleLength = (window.KaDOS && window.KaDOS.getConsole)
+      ? String(window.KaDOS.getConsole() || '').length : 0;
   }
 
-  /* Инкрементальный вывод без полного redraw (главный путь для loop()) */
+  /* Инкрементальный вывод без полного redraw (главный путь для loop()).
+     Вывод эмулятора (consoleText) печатается ТОЛЬКО новыми символами —
+     иначе каждый кадр перепечатывался весь буфер и экран «не двигался». */
+  var lastEmuConsoleLength = 0;
+
   function termAppend(text) {
     termPutStr(String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+  }
+
+  function termAppendEmuDelta() {
+    if (!window.KaDOS || !window.KaDOS.getConsole) return;
+    var full = String(window.KaDOS.getConsole() || '');
+    if (full.length <= lastEmuConsoleLength) {
+      /* программа перезапущена/буфер сброшен — перерисовать с нуля */
+      if (full.length < lastEmuConsoleLength) {
+        lastEmuConsoleLength = 0;
+        termAppendEmuDelta();
+      }
+      return;
+    }
+    var delta = full.slice(lastEmuConsoleLength);
+    lastEmuConsoleLength = full.length;
+    termAppend(delta);
   }
 
   function closeTerminal() {
@@ -472,6 +507,21 @@
     var name = (firstSpace < 0 ? source : source.slice(0, firstSpace)).toUpperCase();
     var argument = firstSpace < 0 ? '' : source.slice(firstSpace + 1).trim();
 
+    /* Поддержка T9-ошибок Nokia: пробелы внутри слова недопустимы в командах —
+       если после имени команды идёт «слипшаяся» строка без пробела (например
+       "R UN HELLO" или "RUNHELLO"), пробуем распознать команду по префиксу. */
+    if (!['HELP', 'FILES', 'RUN', 'SEND', 'CLS', 'EXIT'].includes(name)) {
+      var knownCommands = ['HELP', 'FILES', 'RUN', 'SEND', 'CLS', 'EXIT'];
+      for (var ci = 0; ci < knownCommands.length; ci++) {
+        var kc = knownCommands[ci];
+        if (name.length > kc.length && name.indexOf(kc) === 0) {
+          argument = name.slice(kc.length) + (argument ? ' ' + argument : '');
+          name = kc;
+          break;
+        }
+      }
+    }
+
     if (name === 'HELP') {
       termPrint('HELP  FILES  RUN <file>  SEND <text>  CLS  EXIT\n');
     } else if (name === 'CLS') {
@@ -498,6 +548,45 @@
         else window.KaDOS.pressKey(13);
       }
     } else if (name === 'FILES' || name === 'RUN') {
+      /* встроенные демо (HELLO/ECHO/COUNT) ищем сразу — без SD-сканирования;
+         на Nokia 800 Tough Device Storage API может быть недоступен,
+         а демо зашиты в KaLoader.DEMOS */
+      var demoMatch = window.KaLoader && window.KaLoader.DEMOS
+        ? window.KaLoader.DEMOS.filter(function (d) {
+            var dn = String(d.name).toUpperCase();
+            return argument && (dn === argument.toUpperCase() || dn === argument.toUpperCase() + '.COM');
+          })[0] : null;
+      if (name === 'RUN' && demoMatch) {
+        termPrint('Starting ' + demoMatch.name + '\n');
+        loadProgram(demoMatch.bytes, demoMatch.name);
+        return;
+      }
+      /* RUN без SD-хранилища: fallback на встроенные демо даже при ошибке API */
+      function runFromDemos() {
+        var demos = (window.KaLoader && window.KaLoader.DEMOS) || [];
+        var found = demos.filter(function (d) {
+          var dn = String(d.name).toUpperCase();
+          return argument && (dn === argument.toUpperCase() || dn === argument.toUpperCase() + '.COM');
+        })[0];
+        if (found) {
+          termPrint('Starting ' + found.name + ' (built-in)\n');
+          loadProgram(found.bytes, found.name);
+        } else {
+          termPrint('Program not found: ' + argument + '\n');
+          termPrint('Built-in: ' + demos.map(function (d) { return d.name; }).join(', ') + '\n');
+        }
+      }
+      if (!window.navigator || (typeof window.navigator.getDeviceStorages !== 'function' &&
+          typeof window.navigator.getDeviceStorage !== 'function')) {
+        if (name === 'FILES') {
+          terminalHistory += ((window.KaLoader && window.KaLoader.DEMOS) || [])
+            .map(function (d) { return d.name + ' (built-in)'; }).join('\n') + '\n';
+          renderTerminal();
+        } else {
+          runFromDemos();
+        }
+        return;
+      }
       window.KaLoader.listSdFiles().then(function (items) {
         var programs = items.filter(function (item) { return /\.(com|bin)$/i.test(item.name || item.path || ''); });
         if (name === 'FILES') {

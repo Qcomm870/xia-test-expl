@@ -51,26 +51,49 @@
   var t9HintEl = document.getElementById('t9-hint');
 
   function t9CommittedText() {
-    return t9BufferEl ? t9BufferEl.textContent.replace(/\|$/, '') : terminalLine;
+    if (!t9BufferEl) return terminalLine;
+    /* буфер содержит caret-элемент внутри — берём только текстовые узлы,
+       иначе textContent включает '|' и мусор попадает в команду */
+    var out = '';
+    for (var n = t9BufferEl.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3) out += n.nodeValue;
+    }
+    return out;
+  }
+
+  function t9VisiblePending() {
+    if (t9Key < 0) return '';
+    var ch = t9Keys[t9Key][t9Index];
+    if (/[a-z]/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
+    return '[' + ch + ']';
   }
 
   function t9Render() {
     if (!t9BufferEl || !t9CaretEl) return;
     var text = t9CommittedText();
-    var pending = '';
-    if (t9Key >= 0) {
-      var ch = t9Keys[t9Key][t9Index];
-      pending = /[a-z]/.test(ch) && t9Upper ? ch.toUpperCase() : ch;
-    }
-    t9BufferEl.textContent = text + pending;
+    /* видимый текст = подтверждённый + pending-буква в скобках (как T9 Nokia) */
+    var visible = document.createTextNode(text + t9VisiblePending());
+    while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild);
+    t9BufferEl.appendChild(visible);
     t9BufferEl.appendChild(t9CaretEl);
     if (t9HintEl) {
       var mode = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
       var options = t9Key >= 0 ? t9Keys[t9Key].join(' ') : '';
       t9HintEl.textContent = mode + (options ? ' | ' + options : '');
     }
-    terminalLine = text + pending;
-    if (terminalInput) terminalInput.value = terminalLine;
+    terminalLine = text;
+    if (terminalInput) terminalInput.value = text;
+  }
+
+  function t9SetText(text) {
+    if (!t9BufferEl) return;
+    /* замена только текстового узла — caret-элемент не должен теряться */
+    var node = t9BufferEl.firstChild;
+    if (node && node.nodeType === 3) node.nodeValue = text;
+    else if (node) { while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild); }
+    if (!t9BufferEl.firstChild || t9BufferEl.firstChild.nodeType !== 3) {
+      t9BufferEl.insertBefore(document.createTextNode(text), t9BufferEl.firstChild);
+    }
   }
 
   function t9Commit() {
@@ -83,7 +106,7 @@
       else if (t9Upper) ch = ch.toUpperCase();
     }
     text += ch;
-    if (t9BufferEl) t9BufferEl.textContent = text;
+    t9SetText(text);
     t9Key = -1;
     t9Index = 0;
     t9Control = false;
@@ -108,7 +131,7 @@
     if (t9Key >= 0) { t9Key = -1; t9Index = 0; t9Render(); return; }
     var text = t9CommittedText();
     if (text.length) {
-      if (t9BufferEl) t9BufferEl.textContent = text.slice(0, -1);
+      t9SetText(text.slice(0, -1));
       t9Render();
     }
   }
@@ -117,7 +140,7 @@
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     t9Commit();
     var command = t9CommittedText();
-    if (t9BufferEl) t9BufferEl.textContent = '';
+    t9SetText('');
     t9Render();
     submitTerminalLine(command);
   }
@@ -184,43 +207,62 @@
     return panel && !panel.classList.contains('hidden');
   }
 
-  /* ===== Терминальная сетка 20x13 (порт из Terminal от Affe Null, app.js) =====
-     Вывод рендерится построчно в <pre>, как в оригинале: каждая строка — span
-     с символами-спанамми + <br>. Это даёт корректный «экран» без прокрутки и
-     без наложений. */
+  /* ===== Терминальная сетка (порт из Terminal от Affe Null, app.js) =====
+     Как в оригинале: N строк по M колонок, каждая строка — <span> с
+     посимвольными <span> + <br>; при переполнении первая строка удаляется
+     (newLine/removeChild(elTerm.firstChild)). Никакого innerHTML-хеша и
+     «последняя строка обрезается» — вывод обновляется мгновенно. */
   var TERM_COLS = 20;   // как maxx в оригинале (240px / 18px моноширинный)
-  var TERM_ROWS = 13;   // как maxy в оригинале (320px шапка+вывод+ввод)
+  var TERM_ROWS = 12;   // как maxy в оригинале (минус шапка/подсказка/ввод)
   var termGridEl = null;
-  var termLastRender = '';
+  var termRows = [];    // массив span-элементов строк
 
   function ensureTermGrid() {
     if (!termGridEl) termGridEl = document.getElementById('terminal-output');
+    if (termGridEl && !termRows.length) {
+      termGridEl.innerHTML = '';
+      for (var i = 0; i < TERM_ROWS; i++) {
+        var lineEl = document.createElement('span');
+        for (var j = 0; j < TERM_COLS; j++) {
+          var chEl = document.createElement('span');
+          chEl.textContent = ' ';
+          lineEl.appendChild(chEl);
+        }
+        termGridEl.appendChild(lineEl);
+        termGridEl.appendChild(document.createElement('br'));
+        termRows.push(lineEl);
+      }
+    }
     return termGridEl;
   }
 
-  function renderTerminal() {
+  /* Печать одного символа в позицию сетки (как setChar в оригинале) */
+  function termSetCell(row, col, ch) {
+    var lineEl = termRows[row];
+    if (!lineEl) return;
+    var cell = lineEl.childNodes[col];
+    if (cell) cell.textContent = ch;
+  }
+
+  /* Полный redraw текстового буфера по сетке 20xTERM_ROWS, хвост виден */
+  function termPaint(text) {
     var display = ensureTermGrid();
     if (!display) return;
-    var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    if (text === termLastRender) return;
-    termLastRender = text;
-    var lines = text.split('\n');
+    var lines = String(text).split('\n');
     if (lines.length && lines[lines.length - 1] === '') lines.pop();
-    /* хвостовые строки видны всегда (как scroll в оригинале, но фиксированным окном) */
     if (lines.length > TERM_ROWS) lines = lines.slice(lines.length - TERM_ROWS);
-    display.innerHTML = '';
-    for (var i = 0; i < lines.length; i++) {
-      var lineEl = document.createElement('span');
-      var line = lines[i];
+    for (var i = 0; i < TERM_ROWS; i++) {
+      var line = lines[i] || '';
       if (line.length > TERM_COLS) line = line.slice(0, TERM_COLS);
-      for (var j = 0; j < line.length; j++) {
-        var chEl = document.createElement('span');
-        chEl.textContent = line[j];
-        lineEl.appendChild(chEl);
+      for (var j = 0; j < TERM_COLS; j++) {
+        termSetCell(i, j, j < line.length ? line.charAt(j) : ' ');
       }
-      display.appendChild(lineEl);
-      display.appendChild(document.createElement('br'));
     }
+  }
+
+  function renderTerminal() {
+    var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    termPaint(text);
   }
 
   function closeTerminal() {
@@ -327,7 +369,7 @@
       event.preventDefault();
       event.stopPropagation();
       if (t9Key >= 0) t9Commit();
-      if (t9BufferEl) t9BufferEl.textContent = t9CommittedText() + ' ';
+      t9SetText(t9CommittedText() + ' ');
       t9Render();
       return true;
     }
@@ -346,7 +388,7 @@
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     t9Key = -1;
     t9Index = 0;
-    if (t9BufferEl) t9BufferEl.textContent = command || '';
+    t9SetText(command || '');
     t9Render();
     renderTerminal();
   }
@@ -451,7 +493,7 @@
       var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
       t9Key = -1; t9Index = 0;
-      if (t9BufferEl) t9BufferEl.textContent = t9CommittedText() + ch;
+      t9SetText(t9CommittedText() + ch);
       t9Render();
       event.preventDefault();
       event.stopPropagation();
@@ -460,7 +502,7 @@
     if (key === ' ') {
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
       t9Key = -1; t9Index = 0;
-      if (t9BufferEl) t9BufferEl.textContent = t9CommittedText() + ' ';
+      t9SetText(t9CommittedText() + ' ');
       t9Render();
       event.preventDefault();
       event.stopPropagation();
@@ -699,7 +741,17 @@
     if (!window.KaDOS) { setTimeout(loop, 100); return; }
     var out = KaDOS.runSlice(BUDGET);
     var s = KaDOS.getConsole();
-    if (s) { consoleText += s; mode = 'text'; }
+    if (s) {
+      consoleText += s; mode = 'text';
+      /* как putStr в оригинале Terminal: каждая строка вывода уходит в историю
+         и мгновенно перерисовывает сетку терминала */
+      var parts = s.split('\n');
+      for (var pi = 0; pi < parts.length; pi++) {
+        if (pi > 0) terminalHistory += '\n';
+        terminalHistory += parts[pi];
+      }
+      if (terminalIsOpen()) renderTerminal();
+    }
     if (KaDOS.vgaDirtyConsume()) mode = 'vga';
     if (mode === 'vga') drawVga(); else drawText();
     if (terminalIsOpen()) renderTerminal();

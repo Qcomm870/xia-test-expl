@@ -56,8 +56,6 @@
      при keydown цифры запускаем интервал 500мс, который сам циклически
      листает группу (a->b->c...), как multi-tap. Остановка — keyup/keyup-like
      события, ввод команды, переключение регистра и т.п. */
-  var t9HoldInterval = null;
-  var t9HoldGroup = -1;
   var t9Upper = false;       // переключатель регистра (#)
   var t9Control = false;     // режим Ctrl (Call)
   var t9BufferEl = document.getElementById('t9-buffer');
@@ -82,6 +80,18 @@
     var group = t9Keys[num];
     if (!group) return String(num);
     return group[index % group.length];
+  }
+
+  /* v0.2.65: очистка строки ввода в putChar-сетке (аналог посимвольного
+     backspace из оригинала, где telnet-эхо сервера зирало каждый '\\b').
+     У нас эха нет — eraseBack() затирает ячейку явно. terminalLine включает
+     pending-символ группы (он уже напечатан), поэтому просто стираем
+     terminalLine.length символов. */
+  function t9ClearInput() {
+    for (var bi = 0; bi < terminalLine.length; bi++) termPrint('\b');
+    terminalLine = '';
+    t9Key = -1;
+    t9Index = 0;
   }
 
   /* Как в оригинале Terminal от Affe Null: pending-символ печатается В ТОЙ ЖЕ
@@ -239,37 +249,18 @@
     /* таймер фиксирует конец группы (sendTimeoutId=setTimeout(send,1000)
        в оригинале): через секунду следующее нажатие начнёт НОВЫЙ символ. */
     t9Timer = setTimeout(function () { t9Commit(); }, 1000);
-    /* v0.2.64: старт long-press цикла для ЭТОЙ группы. Интервал сам листает
-       a->b->c пока кнопка удерживается (см. t9StartHold). */
-    t9StartHold(groupIndex);
     t9Render();
   }
 
-  /* v0.2.64: long-press. На Nokia 800 Tough удержание цифры НЕ даёт
-     автоповторных keydown (KaiOS Gecko шлёт одно keydown + KeyPress-события),
-     поэтому цикл группы запускаем сами: каждые 500мс заменяем pending-символ
-     на следующий в группе. Остановка: keyup (любой), любое новое событие
-     ввода, submit, commit. */
-  function t9StartHold(groupIndex) {
-    t9StopHold();
-    var group = t9Keys[groupIndex];
-    if (!group || group.length < 2) return;   // листать нечего
-    t9HoldGroup = groupIndex;
-    t9HoldInterval = setInterval(function () {
-      /* пока группа активна и терминал открыт — циклически меняем символ */
-      if (!terminalIsOpen() || t9Key !== t9HoldGroup) { t9StopHold(); return; }
-      t9AdvanceGroup(t9HoldGroup);
-      if (t9Timer) clearTimeout(t9Timer);
-      /* продлеваем commit-таймер: символ не должен «зафиксироваться»
-         посреди удержания */
-      t9Timer = setTimeout(function () { t9Commit(); }, 1000);
-    }, 500);
-  }
-
-  function t9StopHold() {
-    if (t9HoldInterval) { clearInterval(t9HoldInterval); t9HoldInterval = null; }
-    t9HoldGroup = -1;
-  }
+  /* v0.2.65: УДАЛЁН long-press цикл (t9StartHold/t9StopHold из v0.2.64).
+     Именно он был причиной «вводится первая буква»: локальный setInterval
+     крутил группу a->b->c независимо от пользователя, и если удержание
+     длилось дольше тика — к моменту отпускания символ уже «убегал», а при
+     коротком нажатии всегда оставалась ПЕРВАЯ буква группы. В оригинальном
+     Terminal от Affe Null никакого удержания нет: только быстрые повторные
+     нажатия той же клавиши (currentKey==num -> index+1 % len) и таймер
+     подтверждения 1000 мс. Делаем ровно так же — см. t9PressGroup. */
+  function t9StopHold() { /* no-op (обратная совместимость вызовов) */ }
 
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
@@ -480,11 +471,17 @@
   }
 
   function submitTerminalLine(forcedCommand) {
-    var command = typeof forcedCommand === 'string' ? forcedCommand
-      : (terminalInput ? terminalInput.value : terminalLine);
-    if (typeof forcedCommand !== 'string') {
-      /* вызов не из T9-пути (например, form.submit с автоподстановкой):
-         строка не была напечатана эхом — печатаем '> команда', как telnet-echo */
+    var command;
+    if (typeof forcedCommand === 'string') {
+      command = forcedCommand;
+    } else if (terminalLine) {
+      /* v0.2.65: штатный путь — T9-эхо уже напечатало строку в putChar-сетку
+         (каждый символ через t9SendRaw), источник истины terminalLine. */
+      command = terminalLine;
+    } else {
+      /* вызов не из T9-пути (form.submit с автоподстановкой): строка не была
+         напечатана эхом — печатаем '> команда', как telnet-echo */
+      command = terminalInput ? terminalInput.value : '';
       termPrint('> ' + command);
     }
     terminalLine = '';
@@ -519,8 +516,9 @@
       else if (kcd >= 96 && kcd <= 105) num = kcd - 96;         // Numpad
     }
     if (num !== null) {
-      /* v0.2.60: передаём флаг автоповтора удержания кнопки */
-      t9PressGroup(num, !!event.repeat);
+      /* v0.2.65: точная модель оригинала Affe Null — только multi-tap
+         повторными нажатиями; никакого удержания/автоповтора. */
+      t9PressGroup(num);
       event.preventDefault();
       event.stopPropagation();
       return true;
@@ -579,9 +577,10 @@
     terminalHistoryIndex = result.index;
     var command = terminalHistoryIndex === terminalCommands.length ? terminalHistoryDraft : result.command;
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    /* стираем из сетки всю текущую набранную строку (включая pending-символ,
-       который тоже уже напечатан), затем перепечатываем команду истории */
-    var eraseLen = terminalLine.length + (t9Key >= 0 ? 1 : 0);
+    /* v0.2.65: eraseLen больше НЕ прибавляет +1 за pending-символ — он уже
+       входит в terminalLine (t9SendRaw печатает его и добавляет в строку),
+       поэтому лишняя затирка съедала предыдущий символ. */
+    var eraseLen = terminalLine.length;
     for (var bi = 0; bi < eraseLen; bi++) termPrint('\b');
     t9Key = -1;
     t9Index = 0;

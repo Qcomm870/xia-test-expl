@@ -63,6 +63,7 @@ var promptText = "root@kaios:~# ";
 var inputLine = "";          /* confirmed characters of the current line */
 var pendingCh = null;        /* currently selected char of the active group */
 var closeCb = null;
+var historyCb = null;      /* v0.2.69: стрелки Up/Down -> история команд хоста */
 
 function process_attrs(code){
         if(code == 1){
@@ -637,7 +638,13 @@ function onKeydown(e){
         }
         if(/Arrow.*/.test(e.key)){
                 if(currentKey >= 0) send();
-                /* history navigation instead of ANSI arrows (local shell) */
+                /* v0.2.69: локальная shell-замена ANSI-стрелок оригинала —
+                   хост (KaDOS main.js) листает историю команд через
+                   terminalHistoryMove и сам перерисовывает строку ввода */
+                if(historyCb){
+                        historyCb(e.key);
+                        e.preventDefault();
+                }
                 return;
         }
         if(e.key == "Back" || e.key == "Escape" || e.keyCode === 27 ||
@@ -669,6 +676,7 @@ window.Terminal = {
                 elTerm.style.backgroundColor = bgColor;
                 commandHandler = opts.commandHandler || null;
                 closeCb = opts.onClose || null;
+                historyCb = opts.onHistory || null;
                 if(!started){
                         for(var i = 0; i < maxy; i++) newLine();
                         started = true;
@@ -676,6 +684,16 @@ window.Terminal = {
         },
         open: function(){
                 document.addEventListener("keydown", onKeydown, true);
+                /* v0.2.69: очистка состояния ввода при открытии (было только
+                   в close() — а host KaDOS закрытие делает через closeTerminal(),
+                   который эту функцию не вызывает; из-за этого inputLine мог
+                   остаться с прошлого сеанса) */
+                commitPending();
+                sendTimeoutId && clearTimeout(sendTimeoutId);
+                sendTimeoutId = 0;
+                pendingCh = null;
+                inputLine = "";
+                control = false; uc = false;
                 /* fresh prompt line */
                 putStr("\r\n" + promptText);
         },

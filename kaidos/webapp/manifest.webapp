@@ -3,7 +3,7 @@
   "description": "16-bit DOS prototype (demo). Fallout 2 NOT supported.",
   "launch_path": "/index.html",
   "type": "privileged",
-  "version": "0.2.59",
+  "version": "0.2.60",
   "developer": {
     "name": "kaidos-project",
     "url": "https://example.com"

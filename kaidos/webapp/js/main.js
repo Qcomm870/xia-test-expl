@@ -170,13 +170,38 @@
     t9Render();
   }
 
-  /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
-  function t9PressGroup(groupIndex) {
+  /* v0.2.60: поддержка УДЕРЖАНИЯ кнопки (key repeat). На Nokia 800 Tough при
+     долгом нажатии аппаратной клавиши KaiOS (Gecko) шлёт серию keydown с
+     event.repeat=true (как автоповтор). Раньше каждое повторное событие
+     вызывало t9PressGroup заново: оно попадало в ветку «первого нажатия»
+     (или сбрасывалось таймером) и всегда печатало ПЕРВУЮ букву группы —
+     поэтому «задерживаешь кнопку — вводится a, а не f».
+     Теперь: события с repeat=true циклически листают группу вперёд через
+     замену символа на месте (a->b->c...), ровно как многократные быстрые
+     нажатия. Задержал до нужной буквы — отпустил, она и остаётся. */
+  var lastT9DownAt = 0;
+
+  function t9AdvanceGroup(groupIndex) {
     var group = t9Keys[groupIndex] || [String(groupIndex)];
-    if (t9Key === groupIndex && terminalLine.length) {
-      /* повторное нажатие той же клавиши: цикл по группе, замена на месте */
-      t9Index = (t9Index + 1) % group.length;
-      t9ReplaceLast(t9ApplyCase(t9CharFor(groupIndex, t9Index)));
+    t9Index = (t9Index + 1) % group.length;
+    t9ReplaceLast(t9ApplyCase(t9CharFor(groupIndex, t9Index)));
+  }
+
+  /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
+  function t9PressGroup(groupIndex, isRepeat) {
+    var now = Date.now();
+    /* защита от двойных событий: если repeat просочился без флага, но между
+       keydown прошло <35мс — считаем это автоповтором, а не новым нажатием */
+    var treatedAsRepeat = !!isRepeat || (t9Key === groupIndex && now - lastT9DownAt < 35);
+    lastT9DownAt = now;
+    var group = t9Keys[groupIndex] || [String(groupIndex)];
+    if (treatedAsRepeat && t9Key === groupIndex) {
+      /* автоповтор удержания ИЛИ повторное быстрое нажатие: цикл по группе,
+         замена символа на месте в putChar-сетке */
+      t9AdvanceGroup(groupIndex);
+    } else if (t9Key === groupIndex && terminalLine.length) {
+      /* медленное повторное нажатие той же клавиши — тоже цикл по группе */
+      t9AdvanceGroup(groupIndex);
     } else {
       /* первое нажатие новой клавиши: символ печатается СРАЗУ, как telnetSend
          в onkeydown оригинала — буква видна немедленно, без скобок и дублей */
@@ -185,8 +210,9 @@
       t9SendRaw(t9ApplyCase(t9CharFor(groupIndex, 0)));
     }
     if (t9Timer) clearTimeout(t9Timer);
-    /* таймер лишь «фиксирует» конец группы: следующее нажатие ДРУГОЙ клавиши
-       начнёт новый символ, а не будет заменять этот */
+    /* таймер фиксирует конец группы: следующее нажатие ДРУГОЙ клавиши
+       начнёт новый символ, а не будет заменять этот. При активном удержании
+       (repeat-события идут каждые ~30-60мс) таймер просто перезапускается. */
     t9Timer = setTimeout(function () { t9Commit(); }, 1000);
     t9Render();
   }
@@ -414,7 +440,8 @@
       else if (kcd >= 96 && kcd <= 105) num = kcd - 96;         // Numpad
     }
     if (num !== null) {
-      t9PressGroup(num);
+      /* v0.2.60: передаём флаг автоповтора удержания кнопки */
+      t9PressGroup(num, !!event.repeat);
       event.preventDefault();
       event.stopPropagation();
       return true;
@@ -1058,6 +1085,17 @@
   }
 
   window.addEventListener('keydown', function (e) {
+    /* v0.2.60: удержание кнопки на Nokia 800 Tough. KaiOS/Gecko при долгом
+       нажатии может слать серию keydown либо с e.repeat=true, либо БЕЗ него
+       (древние сборки), а иногда и дубли keydown+keypress. Флаг repeat здесь
+       — единственная надёжная подсказка; если его нет, t9PressGroup сам
+       распознаёт автоповтор по интервалу <35мс между событиями той же
+       клавиши. Без этого цикла любое «зажатие» печатало только первую букву
+       группы (a вместо f). */
+    if (terminalIsOpen() && typeof e.keyCode === 'number' &&
+        ((e.keyCode >= 48 && e.keyCode <= 57) || (e.keyCode >= 96 && e.keyCode <= 105))) {
+      if (!e.repeat) e.__kadosRepeatGuess = true; // пусть t9PressGroup проверит интервал
+    }
     var key = normalizeKey(e);
     if (handleTerminalKey(e, key)) return;
     if (terminalIsOpen()) return; // в терминале всё перехватывает T9/история

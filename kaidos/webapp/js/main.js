@@ -81,9 +81,19 @@
      ВАЖНО: раньше здесь был ранний return при отсутствии DOM-узлов — если
      index.html не догрузился, НЕ ОБНАРУЖИВАЛОСЬ НИ ВВОДА, НИ ВЫВОДА.
      Теперь узлы опциональны, а состояние всегда дублируется в hud. */
+  /* Синхронизация скрытого <input>: на KaiOS без него IME/T9-клавиатура
+     телефона не отдаёт события клавиш в window.keydown. Значение поля всегда
+     равно подтверждённому тексту буфера — автоподстановка игнорируется
+     (источник истины — наш multi-tap, как в Terminal от Affe Null). */
+  function syncHiddenInput() {
+    if (!terminalInput) return;
+    try { terminalInput.value = t9CommittedText(); } catch (error) {}
+  }
+
   function t9Render() {
     var text = t9CommittedText();
     var visible = text + t9VisiblePending();
+    syncHiddenInput();
     if (t9BufferEl && t9CaretEl) {
       var node = document.createTextNode(visible);
       while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild);
@@ -331,8 +341,11 @@
        старым выводом HELLO.COM и казалось, что вывода команд нет.
        Вывод программ идёт в терминал только инкрементально через loop(). */
     termPutStr(text);
-    lastEmuConsoleLength = (window.KaDOS && window.KaDOS.getConsole)
-      ? String(window.KaDOS.getConsole() || '').length : 0;
+    /* (v0.2.53) Не очищаем getConsole(): буфер эмулятора уже напечатан
+       инкрементально в putChar-сетку; повторный getConsole() здесь крадёт
+       ещё не отрендеренные символы («вывода нет»). lastEmuConsoleLength
+       больше не используется — синхронизация одна: termPrint -> history+grid. */
+    termCharsOk = true;
   }
 
   /* Инкрементальный вывод без полного redraw (главный путь для loop()).
@@ -344,6 +357,7 @@
      только ответы команд. Теперь дельта consoleBuf печатается в сетку после
      каждой порции вывода в loop(). */
   var lastEmuConsoleLength = 0;
+  var termCharsOk = false;   // сетка реально создана (putChar пишет в DOM)
 
   function termAppend(text) {
     ensureTermGrid();   /* сетка создаётся лениво: вывод появляется сразу,
@@ -353,13 +367,29 @@
     termPutStr(norm);
   }
 
-  /* getConsole() ВОЗВРАЩАЕТ И ОЧИЩАЕТ consoleBuf (см. kados.js), поэтому
-     «дельта» — это просто весь непечатанный текст с прошлого вызова:
-     full.length всегда сравнивать с 0 бессмысленно, lastEmuConsoleLength
-    нужен только для renderTerminal-синхронизации. */
-  function termPrintEmuDelta(text) {
+  /* Рендер вывода (v0.2.53, как в оригинале Terminal от Affe Null):
+     putChar-сетка 12x20 — основной и ЕДИНСТВЕННЫЙ путь для инкрементного
+     вывода; <pre id="terminal-output"> больше НЕ заполняется текстом
+     (раньше два параллельных рендера конфликтовали). Если DOM-узлы сетки
+     ещё не готовы — вывод остаётся в terminalHistory и будет перерисован
+     renderTerminal() при открытии терминала. */
+  function termPrint(text) {
     if (!text) return;
-    termAppend(text);
+    var norm = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    ensureTermGrid();
+    if (termChars.length) {
+      termCharsOk = true;
+      termPutStr(norm);
+    } else {
+      termCharsOk = false;
+    }
+    terminalHistory += norm;
+  }
+
+  /* Инкрементный вывод дельты эмулятора: через тот же termPrint
+     (putChar + история), без второго пути записи. */
+  function termPrintEmuDelta(text) {
+    termPrint(text);
   }
 
   function closeTerminal() {
@@ -415,9 +445,15 @@
       : (terminalInput ? terminalInput.value : terminalLine);
     terminalLine = '';
     if (terminalInput) terminalInput.value = '';
-    /* выводим набранную строку в сетку ДО команды, как эхо telnet-сервера:
-       курсор сам уходит на следующую строку через termAppend('\n') */
-    runTerminalCommand(command);
+    /* ЭХО набранной строки — как в оригинале Terminal от Affe Null: там
+       telnet-сервер возвращает набранное обратно, и putChar печатает его в
+       сетку ДО вывода команды. Раньше эха не было вовсе («не видно введённых
+       символов» после Enter). Курсор сам уходит на следующую строку через
+       termAppend('\n'). */
+    if (String(command || '').length) {
+      termPrint('> ' + command + '\n');
+    }
+    runTerminalCommand(command, true);
   }
 
   /* T9-обработчик: возвращает true, если событие перехвачено.
@@ -499,24 +535,23 @@
     t9Render();
   }
 
-  /* Вывод строки в терминал: история + putChar-сетка (как putStr в оригинале).
-     renderTerminal() вызывается только для CLS/FILES — инкрементальный путь
-     не делает полный redraw каждый кадр. */
-  function termPrint(text) {
-    /* ВАЖНО: termAppend сам кладёт текст в terminalHistory — здесь только
-       история, когда терминал закрыт. Раньше было двойное добавление
-       (терминал печатал каждую строку команд дважды). */
-    if (terminalIsOpen()) termAppend(text);
-    else terminalHistory += text;
-  }
+  /* (v0.2.53) Старый termPrint удалён — единый рендер вывода выше
+     (putChar-сетка + terminalHistory). */
 
-  function runTerminalCommand(command) {
+  function runTerminalCommand(command, echoAlreadyPrinted) {
     var source = String(command || '').trim();
-    if (source.trim()) terminalCommands.push(source);
+    /* История команд: раньше push делался только здесь и без дедупа —
+       добавляем и последнюю набранную команду из submitTerminalLine. */
+    if (source.trim() &&
+        terminalCommands[terminalCommands.length - 1] !== source.trim()) {
+      terminalCommands.push(source.trim());
+    }
     terminalHistoryIndex = terminalCommands.length;
     terminalHistoryDraft = '';
     if (!source) return;
-    termPrint('> ' + source + '\n');
+    /* Эхо "> команда" печатает submitTerminalLine (v0.2.53); здесь — только
+       если команда вызвана программно (без флага), чтобы не печатать дважды. */
+    if (!echoAlreadyPrinted) termPrint('> ' + source + '\n');
     var firstSpace = source.indexOf(' ');
     var name = (firstSpace < 0 ? source : source.slice(0, firstSpace)).toUpperCase();
     var argument = firstSpace < 0 ? '' : source.slice(firstSpace + 1).trim();
@@ -655,10 +690,11 @@
     if ((!key || key.length > 1) && typeof event.keyCode === 'number') {
       var kc = event.keyCode;
       if (kc >= 48 && kc <= 57) key = String(kc - 48);            // цифры
+      else if (kc >= 96 && kc <= 105) key = String(kc - 96);      // Numpad-цифры
       else if (kc >= 65 && kc <= 90) key = String.fromCharCode(kc + 32); // буквы -> нижний регистр
-      else if (kc === 13) key = 'Enter';
+      else if (kc === 13 || kc === 23) key = 'Enter';
       else if (kc === 8) key = 'Backspace';
-      else if (kc === 27 || kc === 17) key = 'Back';              // Esc / GoBack на KaiOS
+      else if (kc === 27 || kc === 17 || kc === 461 || kc === 10009) key = 'Back'; // Esc/GoBack на KaiOS
     }
     /* Пробел: e.key=' ' или legacy-алиас 'Enter' от Space — печатаем пробел.
        В терминале Enter это ввод команды, поэтому алиас проверяем по keyCode. */
@@ -927,8 +963,7 @@
          в оригинале Terminal от Affe Null): без полного redraw каждый кадр,
         символы появляются сразу. Дельта также попадает в terminalHistory,
         чтобы после CLS/полного redraw вывод программы не терялся. */
-      if (terminalIsOpen()) termPrintEmuDelta(s);
-      else terminalHistory += s;
+      termPrintEmuDelta(s);
     }
     if (KaDOS.vgaDirtyConsume()) mode = 'vga';
     if (mode === 'vga') drawVga(); else drawText();

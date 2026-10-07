@@ -400,20 +400,24 @@
 
   function ensureTermGrid() {
     if (!window.Terminal) return false;
+    if (termGridReady) return true;
     window.Terminal.init({
       elementId: 'term-text',
       commandHandler: function (line) {
-        /* collect output of runTerminalCommand via capture array */
-        termPrintCapture = [];
+        /* v0.2.69: вывод команд пишется напрямую в putChar-сетку движка
+           через termPrint/termAppend — здесь ничего не перехватываем и
+           НЕ возвращаем строку (иначе вывод печатался дважды). */
         runTerminalCommand(line, true);
-        var out = termPrintCapture.join('');
-        termPrintCapture = null;
-        return out;
+        return "";
       },
-      onClose: function () { closeTerminal(); }
+      onClose: function () { closeTerminal(); },
+      /* v0.2.69: стрелки Up/Down движка оригинала -> история команд KaDOS */
+      onHistory: function (dirKey) { terminalHistoryMove(dirKey); }
     });
+    termGridReady = true;
     return true;
   }
+  var termGridReady = false;
 
   /* renderTerminal вызывается каждый кадр — ничего тяжёлого делать нельзя */
   function renderTerminal() {
@@ -454,7 +458,10 @@
       if (hch === '\b') terminalHistory = terminalHistory.slice(0, -1);
       else terminalHistory += hch;
     }
-    if (window.Terminal) window.Terminal.write(norm);
+    /* v0.2.69: вывод эмулятора приходит из loop() ПОСЛЕ инициализации движка;
+       без init сетки не существует и писать некуда — инициализируем лениво. */
+    if (!window.Terminal || !ensureTermGrid()) return;
+    window.Terminal.write(norm);
   }
 
   /* Единый путь вывода: движок оригинала + копия в terminalHistory
@@ -471,6 +478,9 @@
   }
 
   function closeTerminal() {
+    /* v0.2.69: корректно закрываем движок оригинала (снимает свой keydown-
+       слушатель и сбрасывает состояние multi-tap) */
+    if (window.Terminal && termGridReady) { try { window.Terminal.close(); } catch (e) {} }
     removeCaret();                       // каретка видна только в терминале
     var panel = document.getElementById('terminal-panel');
     if (panel) {
@@ -805,14 +815,39 @@
 
   function handleTerminalKey(event, key) {
     if (!terminalIsOpen()) return false;
-    /* v0.2.68: ЕДИНСТВЕННЫЙ обработчик ввода — оригинальный движок Terminal
-       (js/terminal.js от Affe Null). Его onKeydown зарегистрирован с capture
-       на document и сам делает multi-tap T9: символ печатается МГНОВЕННО при
-       каждом keydown, повторные нажатия заменяют его на месте через backspace
-       (a->b->c), фиксация группы таймером 1000 мс. Никакого удержания кнопки
-       не нужно. Самописный слой main.js (t9PressGroup/t9SendRaw/...) больше
-       НЕ участвует во вводе — иначе два обработчика дублировали символы. */
+    /* v0.2.69: ЕДИНСТВЕННЫЙ обработчик ввода — оригинальный движок Terminal
+       (js/terminal.js от Affe Null): putChar-сетка + multi-tap T9 по НОМЕРАМ
+       клавиш (keys[num][index], как в app.js). Символ печатается МГНОВЕННО,
+       повторные нажатия заменяют его на месте, фиксация — таймером 1000 мс.
+
+       ВАЖНОЕ ИСПРАВЛЕНИЕ: раньше движку отдавалось ВСЕ события, включая
+       нормализованные aliases ('Space'→'Enter', 'GoBack'→'Back' и т.п.).
+       Движок при этом сам смотрит в e.keyCode: KaiOS-пробел (keyCode 32,
+       alias 'Enter') он трактовал как ВВОД КОМАНДЫ, а аппаратный Back
+       (461/10009) — как обычный ввод. Теперь в терминале работают ТОЛЬКО
+       штатные события (цифры 0-9, Enter, Backspace, #, Call, SoftLeft,
+       стрелки, буквы физической клавиатуры); всё остальное гасится без
+       передачи движку. */
     if (window.Terminal && typeof window.Terminal.handleKey === 'function') {
+      var kc = event.keyCode || event.which || 0;
+      var isDigitEvent = (key >= '0' && key <= '9' && key.length === 1) ||
+        /^Digit[0-9]$/.test(key || '') || /^Numpad[0-9]$/.test(key || '') ||
+        (kc >= 48 && kc <= 57) || (kc >= 96 && kc <= 105);
+      var isEnterEvent = (key === 'Enter' && kc !== 32) || kc === 13 || kc === 23;
+      var isOtherKnown = key === 'Backspace' || kc === 8 ||
+        key === '#' || kc === 35 || key === 'Call' || key === 'SoftLeft' ||
+        (/^Arrow/.test(key || '')) ||
+        (key && key.length === 1 && /[a-zA-Z]/.test(key));
+      if (!(isDigitEvent || isEnterEvent || isOtherKnown)) {
+        /* Back/Escape/SoftRight — закрыть терминал; прочее — проигнорировать */
+        event.preventDefault();
+        event.stopPropagation();
+        if (key === 'Back' || key === 'Escape' || key === 'SoftRight' ||
+            kc === 27 || kc === 17 || kc === 461 || kc === 10009) {
+          closeTerminal();
+        }
+        return true;
+      }
       return window.Terminal.handleKey(event);
     }
     /* Fallback на keyCode (как в оригинале app.js): если normalizeKey вернул
@@ -826,13 +861,12 @@
       else if (kc === 8) key = 'Backspace';
       else if (kc === 27 || kc === 17 || kc === 461 || kc === 10009) key = 'Back'; // Esc/GoBack на KaiOS
     }
-    /* Пробел: e.key=' ' или legacy-алиас 'Enter' от Space — печатаем пробел.
-       В терминале Enter это ввод команды, поэтому алиас проверяем по keyCode. */
-    if (key === ' ' || (key === 'Enter' && (event.keyCode === 32 || event.code === 'Space'))) {
+    /* v0.2.69: если движок не загрузился — штатный путь через самописный
+       слой main.js (handleT9Key). Пробел и буквы печатаем в putChar-сетку. */
+    if (key === ' ') {
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
       t9Key = -1; t9Index = 0;
       t9SendRaw(' ');                    // единственный рендер ввода
-      t9Render();
       event.preventDefault();
       event.stopPropagation();
       return true;
@@ -843,7 +877,6 @@
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
       t9Key = -1; t9Index = 0;
       t9SendRaw(ch);                     // единственный рендер ввода
-      t9Render();
       event.preventDefault();
       event.stopPropagation();
       return true;
@@ -1566,10 +1599,13 @@
       ensureTermGrid();
       if (window.Terminal && !termOpenedOnce) {
         window.Terminal.reset();
-        window.Terminal.write(TERM_PROMPT);
         termOpenedOnce = true;
       }
-      t9Render();
+      /* v0.2.69: открываем движок оригинала — он вешает СВОЙ keydown-слушатель
+         (multi-tap T9 один-в-один как в app.js Affe Null) и печатает чистую
+         строку приглашения «root@kaios:~# ». Без вызова open() движок ничего
+         не слушал — «терминал пустой, ввод не работает». */
+      if (window.Terminal) { try { window.Terminal.open(); } catch (e) {} }
       setTimeout(function () {
         /* фокус на скрытом поле: клавиши доходят до window.keydown, IME не мешает */
         if (terminalIsOpen() && terminalInput) {

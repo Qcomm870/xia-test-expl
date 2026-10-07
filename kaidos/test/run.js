@@ -151,10 +151,11 @@ function ok(name, cond) { console.log((cond ? 'PASS' : 'FAIL') + '  ' + name); i
   var styles = require('fs').readFileSync(require('path').join(__dirname, '../webapp/css/style.css'), 'utf8');
   ok('save-as panel hidden on startup', /#save-as-panel\.hidden\s*\{\s*display\s*:\s*none\s*;?\s*\}/.test(styles));
   var markup = require('fs').readFileSync(require('path').join(__dirname, '../webapp/index.html'), 'utf8');
-  ok('terminal uses native input without an on-screen keypad', /<input id="terminal-input" type="text"/.test(markup) && !/id="terminal-keypad"/.test(markup));
-  ok('terminal has visible T9 buffer and hint line', /id="t9-buffer"/.test(markup) && /id="t9-hint"/.test(markup));
-  ok('terminal output is a fixed 20x13 grid window (Affe Null port, no scroll)', /#terminal-output\{position:absolute;top:28px/.test(styles) && /overflow:hidden/.test(styles) && !/overflow-y:scroll/.test(styles));
-  ok('terminal fills the screen in portrait, compatible with KaiOS 2.5 Gecko', /#terminal-panel\{position:fixed;top:0;left:0;right:auto;bottom:auto;width:100%;height:100%/.test(styles) && !/\binset:/.test(styles));
+  // v0.2.68+: verbatim Affe Null terminal port — engine script + <pre> grid, launch button, no custom keypad
+  ok('original Affe Null terminal engine is included', /<script src="js\/terminal\.js"><\/script>/.test(markup));
+  ok('terminal has a pre-based text grid (no on-screen keypad)', /<pre id="term-text"><\/pre>/.test(markup) && !/id="terminal-keypad"/.test(markup));
+  ok('terminal launched from main menu button', /id="open-terminal"/.test(markup));
+  ok('terminal panel fills the screen in portrait, no scroll', /#terminal-panel\{position:fixed;top:0;left:0;width:100%;height:100%/.test(styles) && /overflow:hidden/.test(styles) && !/\binset:/.test(styles));
 })();
 
 function fakeStorage(storageName, paths) {

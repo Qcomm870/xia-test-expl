@@ -441,6 +441,7 @@
   }
 
   var termCharsOk = false;   // сетка реально создана (движок пишет в DOM)
+  var termOpenedOnce = false; // v0.2.68: чистый экран движка при первом открытии
 
   function termAppend(text) {
     if (!text) return;
@@ -804,6 +805,16 @@
 
   function handleTerminalKey(event, key) {
     if (!terminalIsOpen()) return false;
+    /* v0.2.68: ЕДИНСТВЕННЫЙ обработчик ввода — оригинальный движок Terminal
+       (js/terminal.js от Affe Null). Его onKeydown зарегистрирован с capture
+       на document и сам делает multi-tap T9: символ печатается МГНОВЕННО при
+       каждом keydown, повторные нажатия заменяют его на месте через backspace
+       (a->b->c), фиксация группы таймером 1000 мс. Никакого удержания кнопки
+       не нужно. Самописный слой main.js (t9PressGroup/t9SendRaw/...) больше
+       НЕ участвует во вводе — иначе два обработчика дублировали символы. */
+    if (window.Terminal && typeof window.Terminal.handleKey === 'function') {
+      return window.Terminal.handleKey(event);
+    }
     /* Fallback на keyCode (как в оригинале app.js): если normalizeKey вернул
        служебное имя вместо символа, восстанавливаем символ из keyCode. */
     if ((!key || key.length > 1) && typeof event.keyCode === 'number') {
@@ -1548,12 +1559,16 @@
       if (appShell) appShell.classList.add('terminal-mode');
       updateTerminalViewport();
       setTerminalOrientation(true);
-      /* v0.2.64: перерисовываем сетку из истории целиком (экран мог быть
-         очищен/пересобран), затем промпт если пусто */
-      renderTerminalFull();
-      /* v0.2.63: при первом открытии — чистый экран с промптом как в
-         оригинальном Terminal (никакого "Welcome to KaDOS") */
-      if (!terminalHistory) termEngineResetAndPrompt();
+      /* v0.2.68: терминал — ЧИСТЫЙ экран оригинального движка Terminal
+         (Affe Null): без «Welcome to KaDOS», без перерисовки истории.
+         Движок сам печатает promptText («root@kaios:~# ») и держит всю
+         дальнейшую работу вывода/ввода. */
+      ensureTermGrid();
+      if (window.Terminal && !termOpenedOnce) {
+        window.Terminal.reset();
+        window.Terminal.write(TERM_PROMPT);
+        termOpenedOnce = true;
+      }
       t9Render();
       setTimeout(function () {
         /* фокус на скрытом поле: клавиши доходят до window.keydown, IME не мешает */

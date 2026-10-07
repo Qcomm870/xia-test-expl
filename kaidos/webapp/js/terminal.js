@@ -687,6 +687,15 @@ window.Terminal = {
                 pendingCh = null;
                 inputLine = "";
         },
+        /* v0.2.68: точка входа для host-приложения (KaDOS). Возвращает true,
+           если событие обработано движком. В отличие от оригинала, где
+           keydown слушался всегда, здесь ввод активен только когда терминал
+           открыт (host вызывает handleKey из своего window-keydown capture). */
+        handleKey: function(e){
+                if(!started) return false;
+                onKeydown(e);
+                return true;
+        },
         write: function(str){
                 putStr(str);
         },
@@ -697,6 +706,20 @@ window.Terminal = {
                 curx = 0; cury = 0;
                 for(var i = 0; i < maxy; i++) newLine();
         },
-        putStr: putStr
+        putStr: putStr,
+        /* v0.2.68: каретка движка (для визуального '_' в host-приложении) */
+        getCursor: function(){ return { x: curx, y: cury }; },
+        cellAt: function(x, y){
+                if(!chars[y] || !chars[y][x]) return null;
+                return chars[y][x];
+        },
+        /* v0.2.68: затирка ячейки ПЕРЕД кареткой (curx-- + пробел).
+           В оригинале telnet-сервер сам присылал "\b \b"; локальному
+           shell'у KaDOS нужна явная затирка для multi-tap замены и
+           backspace — иначе старый символ остаётся под новым. */
+        eraseBack: function(){
+                if(curx > 0) curx--;
+                setChar(curx, cury, " ", textattrs);
+        }
 };
 })();

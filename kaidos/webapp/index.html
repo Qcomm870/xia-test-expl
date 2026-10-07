@@ -77,9 +77,11 @@
         <button id="terminal-close" type="button">Закрыть</button>
       </header>
       <pre id="terminal-output" aria-live="polite"></pre>
+      <div id="t9-hint" class="t9-hint" aria-live="off">&nbsp;</div>
       <form id="terminal-form" class="terminal-prompt">
-        <label for="terminal-input">&gt;</label>
-        <input id="terminal-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+        <span class="prompt-mark">&gt;</span>
+        <span id="t9-buffer" class="t9-buffer"><span id="t9-caret" class="t9-caret">|</span></span>
+        <input id="terminal-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" inputmode="none" aria-label="Скрытый ввод T9">
       </form>
     </section>
 

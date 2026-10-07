@@ -152,7 +152,8 @@ function ok(name, cond) { console.log((cond ? 'PASS' : 'FAIL') + '  ' + name); i
   ok('save-as panel hidden on startup', /#save-as-panel\.hidden\s*\{\s*display\s*:\s*none\s*;?\s*\}/.test(styles));
   var markup = require('fs').readFileSync(require('path').join(__dirname, '../webapp/index.html'), 'utf8');
   ok('terminal uses native input without an on-screen keypad', /<input id="terminal-input" type="text"/.test(markup) && !/id="terminal-keypad"/.test(markup));
-  ok('terminal output has its own fixed scroll area', /#terminal-output\{position:absolute;top:30px/.test(styles) && /overflow-y:scroll/.test(styles));
+  ok('terminal has visible T9 buffer and hint line', /id="t9-buffer"/.test(markup) && /id="t9-hint"/.test(markup));
+  ok('terminal output has its own fixed scroll area', /#terminal-output\{position:absolute;top:28px/.test(styles) && /overflow-y:scroll/.test(styles));
   ok('terminal uses fixed sizing compatible with KaiOS 2.5 Gecko', /#terminal-panel\{position:fixed;top:0;left:0;right:auto;bottom:auto;width:240px;height:320px/.test(styles) && !/\binset:/.test(styles));
 })();
 

@@ -1,4 +1,4 @@
-/* KaDOS Terminal v0.2.5 — видимый ввод (Т9), вывод, портретная ориентация.
+/* KaDOS Terminal v0.2.45 — видимый ввод (Т9), вывод, портретная ориентация.
    1) Набранная строка всегда видна: "> текст|" с курсором.
    2) Подсказки Т9 показаны отдельной строкой над вводом.
    3) После каждой команды вывод автопрокручивается к последней строке.
@@ -31,7 +31,7 @@
     this.t9mode = 'lower';      // 'upper' | 'lower' | 'num'
     this.history = [];
     this.histIdx = -1;
-    this.maxLines = 18;         // 320x240 portrait: ~18 строк по 12px + инфо-строки
+    this.maxLines = 18;         // экран терминала: ~18 строк по 12px + инфо-строки
     this.bindKeys();
     this.printBanner();
   }
@@ -41,13 +41,21 @@
   TermApp.prototype.render = function () {
     if (this.emuRunning) return;   // VGA-буфер main.js — не перерисовывать поверх эмулятора
     var c = this.ctx, W = 320, H = 240;
+    c.save();
+    // Стандартная (портретная) ориентация Nokia: canvas 320x240 разворачиваем на 90°.
+    // Если прошивка уже отдаёт портретный экран — развернём обратно через window.__kaidosTermNoRotate.
+    if (!window.__kaidosTermNoRotate) {
+      c.translate(W, 0);
+      c.rotate(Math.PI / 2);
+      W = 240; H = 320;
+    }
     c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
     c.font = '12px monospace';
 
     var y = 12;
     // шапка
     c.fillStyle = '#0af';
-    c.fillText('KaDOS TERM  [T9:' + this.t9mode.toUpperCase() + ']', 4, y); y += 14;
+    c.fillText('KaDOS TERM [' + this.t9mode.toUpperCase() + ']', 4, y); y += 14;
 
     // строка вывода (автопрокрутка: последние maxLines-3 строк)
     c.fillStyle = '#0f0';
@@ -67,13 +75,14 @@
     // строка ввода с видимым текстом и курсором
     c.fillStyle = '#fff';
     var shown = this.input + (this.pending ? '[' + (KEYS[this.pending.digit] || [])[this.pending.idx % ((KEYS[this.pending.digit] || []).length || 1)] + ']' : '');
-    var caret = this.t9mode === 'num' ? '|' : '|';
+    var caret = '|';
     c.fillText('> ' + shown + caret, 4, y); y += 12;
 
     // подсказка управления
     c.fillStyle = '#888';
-    c.fillText('OK-run  C-del  *=mode  #=case', 4, H - 4);
+    c.fillText('OK-run C-del *=mode #=case', 4, H - 4);
 
+    c.restore();
     if (this.hud) this.hud.textContent = '';
   };
 
@@ -85,7 +94,7 @@
   };
 
   TermApp.prototype.printBanner = function () {
-    this.lines.push('KaDOS terminal v0.2.5');
+    this.lines.push('KaDOS terminal v0.2.45');
     this.lines.push('type HELP + Enter');
     this.render();
   };
@@ -145,7 +154,7 @@
     } else if (lower === 'cls' || lower === 'clear') {
       this.lines = [];
     } else if (lower === 'ver') {
-      this.print('KaDOS 0.2.5 (Nokia 800 Tough)');
+      this.print('KaDOS 0.2.45 (Nokia 800 Tough)');
     } else if (lower === 'dir') {
       this.print(' HELLO.COM  ECHO.COM  COUNT.COM');
     } else if (lower.indexOf('demo ') === 0) {

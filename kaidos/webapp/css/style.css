@@ -318,26 +318,21 @@ body{
 }
 
 /* Терминал занимает весь экран в стандартной (портретной) ориентации Nokia: 240x320 */
-#terminal-panel{position:fixed;top:0;left:0;right:auto;bottom:auto;width:100%;height:100%;max-width:100vw;max-height:100vh;display:none;padding:0;border:0;border-radius:0;z-index:9999;overflow:hidden;background:#050b08}
-/* Панель терминала видим только когда с неё снят .hidden (display:none у .hidden важнее display:block здесь) */
+/* ===== Terminal: verbatim styles from Affe Null's app.css ===== */
+#terminal-panel{position:fixed;top:0;left:0;width:100%;height:100%;display:none;padding:0;border:0;z-index:9999;overflow:hidden;background:#000}
 #terminal-panel:not(.hidden){display:block}
-body.terminal-mode{padding:0;margin:0;align-items:stretch;justify-content:stretch}
-.app-shell.terminal-mode{position:absolute;top:0;left:0;width:100%;height:100%;max-height:none;max-width:none;border:0;border-radius:0;overflow:hidden}
+body.terminal-mode{padding:0;margin:0}
 .app-shell.terminal-mode .topbar,.app-shell.terminal-mode .screen-shell{display:none}
-.terminal-header{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;max-width:100%;height:28px;padding:0 6px;box-sizing:border-box;color:var(--green);font-weight:700;font-size:12px;background:#050b08}
-#terminal-close{min-height:26px;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--button);color:var(--text);font:11px monospace}
-/* Вывод — фиксированное окно сетки 20x13 как в Terminal от Affe Null: без прокрутки, строки целиком */
-/* Сетка как в оригинальном Terminal (Affe Null): #text 240x320, font 18px.
-   Шапка убрана из потока вывода: grid занимает всю высоту над строкой ввода,
-   ничего не перекрывает и даёт полный обзор 13 строк. */
-#terminal-output{position:absolute;top:28px;left:0;right:0;bottom:58px;box-sizing:border-box;margin:0;padding:0 4px;overflow:hidden;background:#000;color:var(--green);font-family:"Droid Sans Mono","Noto Sans Mono",monospace;font-size:16px;line-height:17px;letter-spacing:0}
-.t9-hint{position:absolute;left:0;right:0;bottom:42px;height:16px;box-sizing:border-box;padding:1px 7px;background:#04100a;color:#ffd27a;font:11px/14px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px solid rgba(126,243,162,0.25)}
-.terminal-prompt{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;width:100%;max-width:100%;height:42px;box-sizing:border-box;padding:4px 7px;background:#07160f;border:1px solid rgba(126,243,162,0.45);color:var(--green);font:14px/1.35 monospace}
-.prompt-mark{flex:0 0 auto}
-.t9-buffer{flex:1;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text);font:14px/1.35 monospace}
-.t9-caret{color:var(--green-strong);animation:terminal-blink 1s steps(1) infinite}
-#terminal-input{position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;background:transparent;color:transparent;font-size:16px}
-@keyframes terminal-blink{to{visibility:hidden}}
+#term-text{
+        height: 320px;
+        width: 240px;
+        overflow: scroll;
+        font-family: "Droid Sans Mono";
+        font-size: 18px;
+        margin: 0px;
+        color: #fff;
+        background-color: #000;
+}
 
 @media (max-width: 360px) {
   body{padding:6px}

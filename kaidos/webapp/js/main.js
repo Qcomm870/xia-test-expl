@@ -379,57 +379,65 @@
     return panel && !panel.classList.contains('hidden');
   }
 
-  /* ===== v0.2.59: встроен ОРИГИНАЛЬНЫЙ движок Terminal от Affe Null =====
-     Файл js/termgrid.js — дословный порт app.js (putChar/newLineAt/
-     removeLineAt/newLine/setChar/ANSI), без самописных упрощений.
-     Единственное отличие от оригинала: вместо telnet-сокета события шлются
-     в консоль KaDOS (onSend -> KaDOS.pressKey). Сетка 20x13, как в оригинале. */
-  var termEngine = null;
+  /* ===== v0.2.68: встроен ОРИГИНАЛЬНЫЙ Terminal от Affe Null =====
+     Файл js/terminal.js — дословный порт app.js (putChar/newLineAt/
+     removeLineAt/newLine/setChar/ANSI + multi-tap T9), без самописных
+     упрощений. Единственное отличие от оригинала: вместо telnet-сокета
+     команды исполняет локальный обработчик runTerminalCommand.
+     Сетка 20x13, как в оригинале. */
+
+  function terminalCmdHandler(line) {
+    var out = '';
+    var captureOld = termPrint;
+    /* перехватываем вывод команд в строку (движок сам напечатает её) */
+    termPrintCapture = [];
+    try { runTerminalCommand(line, true); } finally {}
+    out = termPrintCapture.join('');
+    termPrintCapture = null;
+    return out;
+  }
+  var termPrintCapture = null;
 
   function ensureTermGrid() {
-    var el = document.getElementById('terminal-output');
-    if (!el) return null;
-    if (!termEngine) {
-      termEngine = window.TermGrid.create(el);
-    }
-    return el;
+    if (!window.Terminal) return false;
+    window.Terminal.init({
+      elementId: 'term-text',
+      commandHandler: function (line) {
+        /* collect output of runTerminalCommand via capture array */
+        termPrintCapture = [];
+        runTerminalCommand(line, true);
+        var out = termPrintCapture.join('');
+        termPrintCapture = null;
+        return out;
+      },
+      onClose: function () { closeTerminal(); }
+    });
+    return true;
   }
 
-  /* Полный сброс и перерисовка истории (для CLS / FILES и т.п.) */
+  /* renderTerminal вызывается каждый кадр — ничего тяжёлого делать нельзя */
   function renderTerminal() {
-    ensureTermGrid();
-    if (!termEngine) return;
-    /* v0.2.64: НЕ пересоздаём сетку каждый кадр. Раньше здесь был полный
-       reset + перепечатка terminalHistory — это (а) затирало pending-символ
-       T9, который уже напечатан в сетку, и (б) вызывал мерцание при каждом
-       keydown через loop(). Пересборка из истории нужна только после CLS /
-       открытия терминала — эти места вызывают renderTerminalFull(). */
     termCharsOk = true;
   }
 
   function renderTerminalFull() {
     ensureTermGrid();
-    if (!termEngine) return;
-    removeCaret();                       // reset пересоздаёт DOM-ячейки
-    termEngine.reset();
+    if (!window.Terminal) return;
+    window.Terminal.reset();
     var text = terminalHistory.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    termEngine.putStr(text);
-    /* если идёт набор группы — эхо строки ввода уже в истории; ничего не
-       допечатываем */
+    window.Terminal.write(text);
     termCharsOk = true;
-    placeCaret();                        // каретка после восстановленной строки
   }
 
   function termEngineResetAndPrompt() {
-    removeCaret();
-    if (termEngine && termEngine.reset) termEngine.reset();
+    ensureTermGrid();
+    if (window.Terminal) window.Terminal.reset();
     termPrint(TERM_PROMPT);
     /* v0.2.67: промпт — только визуальный, из истории вычитается (см. submitTerminalLine) */
     var pl = TERM_PROMPT.length;
     if (terminalHistory.slice(-pl) === TERM_PROMPT) {
       terminalHistory = terminalHistory.slice(0, -pl);
     }
-    placeCaret();
   }
 
   var termCharsOk = false;   // сетка реально создана (движок пишет в DOM)
@@ -437,22 +445,15 @@
   function termAppend(text) {
     if (!text) return;
     var norm = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    /* v0.2.66: история должна повторять поведение движка putChar — раньше
-       '\\b' просто конкатенировался в terminalHistory, и renderTerminalFull()
-       при перерисовке печатал backspace-мусор (сдвиги, дырки в тексте).
-       Теперь: '\\b' затирает последний символ истории (как eraseBack в сетке),
-       простой моделью: backspace удаляет предшествующий символ. */
+    /* v0.2.68: ДВИЖОК ОРИГИНАЛА Terminal (js/terminal.js) — единственный
+       рендер вывода (putChar-сетка 20x13). terminalHistory ведём параллельно
+       только для перерисовки после CLS: '\b' затирает последний символ. */
     for (var hi = 0; hi < norm.length; hi++) {
       var hch = norm.charAt(hi);
       if (hch === '\b') terminalHistory = terminalHistory.slice(0, -1);
       else terminalHistory += hch;
     }
-    ensureTermGrid();
-    if (termEngine) {
-      removeCaret();                     // вывод затрёт ячейку под кареткой
-      termEngine.putStr(norm);
-      termCharsOk = true;
-    }
+    if (window.Terminal) window.Terminal.write(norm);
   }
 
   /* Единый путь вывода: движок оригинала + копия в terminalHistory

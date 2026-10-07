@@ -71,18 +71,8 @@
       <button id="save-status-ok" type="button">ОК</button>
     </div>
 
-    <section id="terminal-panel" class="panel hidden" aria-label="Терминал KaDOS" tabindex="-1">
-      <header class="terminal-header">
-        <span>KaDOS Terminal</span>
-        <button id="terminal-close" type="button">Закрыть</button>
-      </header>
-      <pre id="terminal-output" aria-live="polite"></pre>
-      <div id="t9-hint" class="t9-hint" aria-live="off">&nbsp;</div>
-      <form id="terminal-form" class="terminal-prompt">
-        <span class="prompt-mark">&gt;</span>
-        <span id="t9-buffer" class="t9-buffer"><span id="t9-caret" class="t9-caret">|</span></span>
-        <input id="terminal-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" inputmode="none" aria-label="Скрытый ввод T9">
-      </form>
+    <section id="terminal-panel" class="panel hidden" aria-label="Терминал" tabindex="-1">
+      <pre id="term-text"></pre>
     </section>
 
     <main class="screen-shell">
@@ -93,7 +83,7 @@
 
   <script src="js/kados.js"></script>
   <script src="js/loader.js"></script>
-  <script src="js/termgrid.js"></script>
+  <script src="js/terminal.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>

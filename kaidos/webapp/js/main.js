@@ -40,6 +40,8 @@
 
   function loop() {
     if (!window.KaDOS) { setTimeout(loop, 100); return; }
+    // Режим терминала: VM и консоль принадлежат KaDOSTerm — не мешаем.
+    if (window.KaDOSTerm) { setTimeout(loop, 250); return; }
     var out = KaDOS.runSlice(BUDGET);
     var s = KaDOS.getConsole();
     if (s) { consoleText += s; mode = 'text'; }
@@ -53,9 +55,10 @@
     setTimeout(loop, 16);
   }
 
-  // Клавиатура: Nokia T9 -> scancode-like коды; на десктопе обычные клавиши
+  // Клавиатура: Nokia T9 -> scancode-like коды; на десктопе обычные клавиши.
+  // Когда активен KaDOSTerm, ввод обрабатывает терминал (свои слушатели) — не мешаем.
   document.addEventListener('keydown', function (e) {
-    if (!window.KaDOS) return;
+    if (!window.KaDOS || window.KaDOSTerm) return;
     var map = { Enter: 13, Backspace: 8, Escape: 27 };
     if (map[e.key] !== undefined) { KaDOS.pressKey(map[e.key]); e.preventDefault(); return; }
     if (e.key.length === 1) KaDOS.pressKey(e.key.toUpperCase().charCodeAt(0));
@@ -87,6 +90,6 @@
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { loadDemo(); loop(); });
-  } else { loadDemo(); loop(); }
+    document.addEventListener('DOMContentLoaded', function () { loop(); });
+  } else { loop(); }
 })();

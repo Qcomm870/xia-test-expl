@@ -567,6 +567,7 @@
     vgaBuffer: function () { return mem.subarray(0xA0000, 0xA0000 + 320 * 200); },
     vgaMode: function () { return vgaMode; },
     vgaDirtyConsume: function () { var d = vgaDirty; vgaDirty = false; return d; },
+    resetHalt: function () { halted = null; running = true; },   // перезапуск VM после exit/halt (для терминала)
     regs: regs, mem: mem
   };
 })(this);

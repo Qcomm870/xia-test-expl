@@ -49,6 +49,15 @@
   var t9Key = -1;            // индекс текущей клавиши-группы
   var t9Index = 0;           // индекс символа внутри группы
   var t9Timer = null;        // задержка «добора» символа (как sendTimeoutId=setTimeout(send,1000) в оригинале)
+  /* v0.2.64: длинное нажатие (long-press). На Nokia 800 Tough удержание
+     аппаратной цифры НЕ генерирует keydown-автоповтор с e.repeat=true —
+     KaiOS шлёт один keydown и потом KeyPress-события (или молчит), поэтому
+     раньше «задерживаешь кнопку — вводится только первая буква». Теперь:
+     при keydown цифры запускаем интервал 500мс, который сам циклически
+     листает группу (a->b->c...), как multi-tap. Остановка — keyup/keyup-like
+     события, ввод команды, переключение регистра и т.п. */
+  var t9HoldInterval = null;
+  var t9HoldGroup = -1;
   var t9Upper = false;       // переключатель регистра (#)
   var t9Control = false;     // режим Ctrl (Call)
   var t9BufferEl = document.getElementById('t9-buffer');
@@ -133,6 +142,7 @@
      символ уже напечатан в сетку, нужно лишь закрыть группу. */
   function t9ForceCommit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9StopHold();                        // v0.2.64: остановить long-press цикл
     if (t9Key >= 0) { t9Key = -1; t9Index = 0; }
   }
 
@@ -177,6 +187,7 @@
      уже отправлен) — только сбрасывает состояние. Здесь то же самое. */
   function t9Commit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9StopHold();                        // v0.2.64: отпускание/фиксация группы
     t9Key = -1;
     t9Index = 0;
     t9Control = false;                   // Ctrl одноразовый (как control=false в send())
@@ -202,7 +213,6 @@
 
   /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
   function t9PressGroup(groupIndex, isRepeat) {
-    var now = Date.now();
     /* ВАЖНОЕ УПРОЩЕНИЕ v0.2.63: раньше здесь была эвристика «repeat по
        интервалу <35мс», которая ломала обычный multi-tap: быстрое повторное
        нажатие той же клавиши тоже попадало в неё, и символ улетал дальше по
@@ -211,13 +221,12 @@
        детекции повторов нет вообще: каждое keydown = сдвиг индекса группы
        (currentKey==num -> index+1 % len), подтверждение — только таймером
        1000 мс или Enter/Backspace/#/Call/SoftLeft. Делаем ровно так же. */
-    void isRepeat; void now;
+    void isRepeat;
     var group = t9Keys[groupIndex] || [String(groupIndex)];
     if (t9Key === groupIndex) {
       /* повторное нажатие ТОЙ ЖЕ клавиши до истечения таймера: цикл по группе,
          замена символа на месте в putChar-сетке (a->b->c->a...) */
-      t9Index = (t9Index + 1) % group.length;
-      t9ReplaceLast(t9ApplyCase(group[t9Index]));
+      t9AdvanceGroup(groupIndex);
     } else {
       /* первая печать новой клавиши: символ сразу виден (как telnetSend в
          onkeydown оригинала); если была открыта старая группа — она просто
@@ -230,11 +239,41 @@
     /* таймер фиксирует конец группы (sendTimeoutId=setTimeout(send,1000)
        в оригинале): через секунду следующее нажатие начнёт НОВЫЙ символ. */
     t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    /* v0.2.64: старт long-press цикла для ЭТОЙ группы. Интервал сам листает
+       a->b->c пока кнопка удерживается (см. t9StartHold). */
+    t9StartHold(groupIndex);
     t9Render();
+  }
+
+  /* v0.2.64: long-press. На Nokia 800 Tough удержание цифры НЕ даёт
+     автоповторных keydown (KaiOS Gecko шлёт одно keydown + KeyPress-события),
+     поэтому цикл группы запускаем сами: каждые 500мс заменяем pending-символ
+     на следующий в группе. Остановка: keyup (любой), любое новое событие
+     ввода, submit, commit. */
+  function t9StartHold(groupIndex) {
+    t9StopHold();
+    var group = t9Keys[groupIndex];
+    if (!group || group.length < 2) return;   // листать нечего
+    t9HoldGroup = groupIndex;
+    t9HoldInterval = setInterval(function () {
+      /* пока группа активна и терминал открыт — циклически меняем символ */
+      if (!terminalIsOpen() || t9Key !== t9HoldGroup) { t9StopHold(); return; }
+      t9AdvanceGroup(t9HoldGroup);
+      if (t9Timer) clearTimeout(t9Timer);
+      /* продлеваем commit-таймер: символ не должен «зафиксироваться»
+         посреди удержания */
+      t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    }, 500);
+  }
+
+  function t9StopHold() {
+    if (t9HoldInterval) { clearInterval(t9HoldInterval); t9HoldInterval = null; }
+    t9HoldGroup = -1;
   }
 
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9StopHold();                        // v0.2.64: остановить long-press цикл
     if (t9Key >= 0) {
       /* как в оригинале: пока идёт набор группы, Backspace ОТМЕНЯЕТ её
          (clearTimeout, currentKey=-1); символ уже напечатан в сетку —
@@ -255,6 +294,7 @@
 
   function t9Submit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9StopHold();                        // v0.2.64: остановить long-press цикл
     t9Key = -1; t9Index = 0;             // группа зафиксирована (символ уже в сетке)
     var command = terminalLine;          // строка уже набрана эхом в сетке
     terminalLine = '';
@@ -344,10 +384,28 @@
   function renderTerminal() {
     ensureTermGrid();
     if (!termEngine) return;
+    /* v0.2.64: НЕ пересоздаём сетку каждый кадр. Раньше здесь был полный
+       reset + перепечатка terminalHistory — это (а) затирало pending-символ
+       T9, который уже напечатан в сетку, и (б) вызывал мерцание при каждом
+       keydown через loop(). Пересборка из истории нужна только после CLS /
+       открытия терминала — эти места вызывают renderTerminalFull(). */
+    termCharsOk = true;
+  }
+
+  function renderTerminalFull() {
+    ensureTermGrid();
+    if (!termEngine) return;
     termEngine.reset();
     var text = terminalHistory.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     termEngine.putStr(text);
+    /* если идёт набор группы — эхо строки ввода уже в истории; ничего не
+       допечатываем */
     termCharsOk = true;
+  }
+
+  function termEngineResetAndPrompt() {
+    if (termEngine && termEngine.reset) termEngine.reset();
+    termPrint(TERM_PROMPT);
   }
 
   var termCharsOk = false;   // сетка реально создана (движок пишет в DOM)
@@ -575,7 +633,7 @@
       terminalHistory = '';
       consoleText = '';
       /* как в оригинальном Terminal: после очистки остаётся только приглашение */
-      termPrint(TERM_PROMPT);
+      termEngineResetAndPrompt();
     } else if (name === 'EXIT') {
       closeTerminal();
       return;
@@ -631,9 +689,8 @@
       if (!window.navigator || (typeof window.navigator.getDeviceStorages !== 'function' &&
           typeof window.navigator.getDeviceStorage !== 'function')) {
         if (name === 'FILES') {
-          terminalHistory += ((window.KaLoader && window.KaLoader.DEMOS) || [])
-            .map(function (d) { return d.name + ' (built-in)'; }).join('\n') + '\n';
-          renderTerminal();
+          termPrint(((window.KaLoader && window.KaLoader.DEMOS) || [])
+            .map(function (d) { return d.name + ' (built-in)'; }).join('\n') + '\n');
         } else {
           runFromDemos();
         }
@@ -642,10 +699,9 @@
       window.KaLoader.listSdFiles().then(function (items) {
         var programs = items.filter(function (item) { return /\.(com|bin)$/i.test(item.name || item.path || ''); });
         if (name === 'FILES') {
-          terminalHistory += programs.length
+          termPrint(programs.length
             ? programs.map(function (item) { return item.name; }).join('\n') + '\n'
-            : 'No COM/BIN files found.\n';
-          renderTerminal();
+            : 'No COM/BIN files found.\n');
           return;
         }
         if (!argument) {
@@ -1106,6 +1162,10 @@
     return false;
   }
 
+  window.addEventListener('keyup', function (e) {
+    if (terminalIsOpen()) t9StopHold();
+  });
+
   window.addEventListener('keydown', function (e) {
     /* v0.2.63: эвристика автоповтора (<35мс) УДАЛЕНА — она ломала обычный
        multi-tap (быстрые повторные нажатия той же клавиши «улетали» дальше по
@@ -1115,7 +1175,14 @@
        Теперь t9PressGroup делает ровно то же самое. */
     var key = normalizeKey(e);
     if (handleTerminalKey(e, key)) return;
-    if (terminalIsOpen()) return; // в терминале всё перехватывает T9/история
+    if (terminalIsOpen()) {
+      /* v0.2.64: keyup любой клавиши останавливает long-press цикл Т9
+         (оригинальный Terminal не нуждался — telnet-сервер сам эхом гнал
+         backspace; у нас цикл крутится локально и должен умирать по
+         отпусканию кнопки, иначе символ «убегает» дальше нужной буквы). */
+      if (e.type === 'keyup') t9StopHold();
+      return;
+    }
     var active = document.activeElement;
     var isTextField = active && /^(INPUT|TEXTAREA)$/.test(active.tagName);
     var mappedKey = fileListDirectionalKey(key);
@@ -1417,7 +1484,9 @@
       if (appShell) appShell.classList.add('terminal-mode');
       updateTerminalViewport();
       setTerminalOrientation(true);
-      renderTerminal();
+      /* v0.2.64: перерисовываем сетку из истории целиком (экран мог быть
+         очищен/пересобран), затем промпт если пусто */
+      renderTerminalFull();
       /* v0.2.63: при первом открытии — чистый экран с промптом как в
          оригинальном Terminal (никакого "Welcome to KaDOS") */
       if (!terminalHistory) termPrint(TERM_PROMPT);

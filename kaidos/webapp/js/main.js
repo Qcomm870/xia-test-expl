@@ -70,11 +70,15 @@
     return group[index % group.length];
   }
 
+  /* Как в оригинале Terminal от Affe Null: pending-символ печатается В ТОЙ ЖЕ
+     ячейке и циклически меняется при повторных нажатиях клавиши. Раньше он
+     показывался в скобках "[f]" после текста — выглядело как мусор перед
+     подтверждённой буквой. Теперь: committed text + сам символ + '|' каретка. */
   function t9VisiblePending() {
     if (t9Key < 0) return '';
     var ch = t9CharFor(t9Key, t9Index);
     if (/^[a-z]$/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
-    return '[' + ch + ']';
+    return ch;
   }
 
   /* Рендер строки состояния: Т9-режим + варианты текущей клавиши + буфер.
@@ -107,7 +111,9 @@
     }
     terminalLine = text;
     if (terminalInput) terminalInput.value = text;
-    if (hud) hud.textContent = '>' + (visible || ' ') + ' [' +
+    /* hud-дублирование строки ввода только когда терминал ОТКРЫТ — иначе
+       каждый кадр loop() затирал статус эмулятора и «съедал» вывод. */
+    if (hud && terminalIsOpen()) hud.textContent = '>' + (visible || ' ') + ' [' +
       (t9Control ? 'CTRL ' : '') + (t9Upper ? 'ABC' : 'abc') + ']';
   }
 
@@ -121,6 +127,12 @@
       t9BufferEl.insertBefore(document.createTextNode(text), t9BufferEl.firstChild);
     }
     if (t9CaretEl && !t9BufferEl.contains(t9CaretEl)) t9BufferEl.appendChild(t9CaretEl);
+  }
+
+  /* Принудительное подтверждение pending-символа (Enter/Backspace/#/Call). */
+  function t9ForceCommit() {
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    if (t9Key >= 0) t9Commit();
   }
 
   function t9Commit() {
@@ -167,6 +179,9 @@
 
   function t9Submit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    /* ВАЖНО (исправление v0.2.54): раньше commit шёл ПОСЛЕ чтения буфера —
+       последний pending-символ терялся ("hel|lo" -> "hello" отправлялось как
+       "hell"). Теперь сначала подтверждение, потом чтение. */
     t9Commit();
     var command = t9CommittedText();
     t9SetText('');
@@ -495,7 +510,11 @@
     if (key === '#') {
       event.preventDefault();
       event.stopPropagation();
-      if (t9Key >= 0) t9Commit();
+      /* ВАЖНО (исправление v0.2.54): раньше здесь читался t9CommittedText()
+         ДО подтверждения pending-символа — строкаHistory перезаписывалась без
+       последней буквы, и следующая нажатая клавиша «возвращала» её ([f] -> f).
+       Сначала принудительный commit, потом чтение. */
+      t9ForceCommit();
       t9Upper = !t9Upper;
       t9Render();
       return true;
@@ -503,7 +522,7 @@
     if (key === 'Call') {
       event.preventDefault();
       event.stopPropagation();
-      if (t9Key >= 0) t9Commit();
+      t9ForceCommit();
       t9Control = !t9Control;
       t9Render();
       return true;
@@ -511,7 +530,7 @@
     if (key === 'SoftLeft') {
       event.preventDefault();
       event.stopPropagation();
-      if (t9Key >= 0) t9Commit();
+      t9ForceCommit();
       t9SetText(t9CommittedText() + ' ');
       t9Render();
       return true;

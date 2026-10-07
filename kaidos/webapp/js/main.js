@@ -77,36 +77,28 @@
     return '[' + ch + ']';
   }
 
-  /* Эхо ввода прямо в сетку терминала (как локальное эхо telnet-клиента):
-     строка набранного текста рисуется поверх пустой последней строки, не
-     сдвигая её; при подтверждении Enter она уходит в историю обычным путём. */
-  function t9EchoLive() {
-    if (!terminalIsOpen()) return;
-    ensureTermGrid();
-    if (!termChars.length) return;
-    var visible = '> ' + (t9CommittedText() + t9VisiblePending());
-    var row = TERM_ROWS - 1;
-    for (var x = 0; x < TERM_COLS; x++) {
-      termSetChar(x, row, x < visible.length ? visible.charAt(x) : ' ');
-    }
-  }
-
+  /* Рендер строки состояния: Т9-режим + варианты текущей клавиши + буфер.
+     ВАЖНО: раньше здесь был ранний return при отсутствии DOM-узлов — если
+     index.html не догрузился, НЕ ОБНАРУЖИВАЛОСЬ НИ ВВОДА, НИ ВЫВОДА.
+     Теперь узлы опциональны, а состояние всегда дублируется в hud. */
   function t9Render() {
-    if (!t9BufferEl || !t9CaretEl) return;
     var text = t9CommittedText();
-    /* видимый текст = подтверждённый + pending-буква в скобках (как T9 Nokia) */
-    var visible = document.createTextNode(text + t9VisiblePending());
-    while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild);
-    t9BufferEl.appendChild(visible);
-    t9BufferEl.appendChild(t9CaretEl);
+    var visible = text + t9VisiblePending();
+    if (t9BufferEl && t9CaretEl) {
+      var node = document.createTextNode(visible);
+      while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild);
+      t9BufferEl.appendChild(node);
+      t9BufferEl.appendChild(t9CaretEl);
+    }
     if (t9HintEl) {
-      var mode = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
+      var modeStr = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
       var options = t9Key >= 0 && t9Keys[t9Key] ? t9Keys[t9Key].join(' ') : '';
-      t9HintEl.textContent = mode + (options ? ' | ' + options : '');
+      t9HintEl.textContent = modeStr + (options ? ' | ' + options : '');
     }
     terminalLine = text;
     if (terminalInput) terminalInput.value = text;
-    t9EchoLive();
+    if (hud) hud.textContent = '>' + (visible || ' ') + ' [' +
+      (t9Control ? 'CTRL ' : '') + (t9Upper ? 'ABC' : 'abc') + ']';
   }
 
   function t9SetText(text) {
@@ -118,6 +110,7 @@
     if (!t9BufferEl.firstChild || t9BufferEl.firstChild.nodeType !== 3) {
       t9BufferEl.insertBefore(document.createTextNode(text), t9BufferEl.firstChild);
     }
+    if (t9CaretEl && !t9BufferEl.contains(t9CaretEl)) t9BufferEl.appendChild(t9CaretEl);
   }
 
   function t9Commit() {
@@ -236,7 +229,7 @@
   /* ===== Полностью порт движка Terminal от Affe Null (app.js) =====
      Сетка 20x13, putChar/newLine/setChar один-в-один как в оригинале.
      Никаких баннеров («Welcome to KaDOS» убран), вывод появляется сразу,
-     строка ввода рисуется отдельным DOM-узлом (не перекрывает вывод). */
+     строка ввода — отдельный DOM-узел под сеткой (ничего не перекрывает). */
   var TERM_COLS = 20;   // maxx в оригинале (240px / 18px Droid Sans Mono)
   var TERM_ROWS = 13;   // maxy в оригинале
   var termGridEl = null;
@@ -290,13 +283,17 @@
     termGridEl.appendChild(document.createElement('br'));
   }
 
-  /* putChar из оригинала: посимвольный рендер с переносом и скроллом */
+  /* putChar из оригинала: посимвольный рендер с переносом и скроллом.
+     ВАЖНО (исправление v0.2.50): в оригинале после \n курсор НЕ сбрасывается
+     в X=0 — строки "HELP\nFILES" печатались слитной строкой. У DOS-консоли
+     перевод строки = CRLF, поэтому здесь \n делает ещё и termCurX=0. */
   function termPutChar(ch) {
     ensureTermGrid();
     if (!termChars.length) return;
     if (ch === '\n') {
       if (termCurY >= TERM_ROWS - 1) termNewLine();
       else termCurY++;
+      termCurX = 0;
       return;
     }
     if (ch === '\r') { termCurX = 0; return; }
@@ -329,8 +326,9 @@
     for (var i = 0; i < TERM_ROWS; i++) termNewLine();
     var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     termPutStr(text);
-    /* сброс флага инкрементального вывода: вся история уже отрисована,
-       иначе next loop() напечатает consoleText повторно поверх истории */
+    /* getConsole() очищает буфер kados.js — здесь она пустая; флаг дельты
+       синхронизируем на всякий случай, чтобы termAppendEmuDelta не печатал
+       повторно то, что уже в consoleText/истории */
     lastEmuConsoleLength = (window.KaDOS && window.KaDOS.getConsole)
       ? String(window.KaDOS.getConsole() || '').length : 0;
   }
@@ -341,6 +339,8 @@
   var lastEmuConsoleLength = 0;
 
   function termAppend(text) {
+    ensureTermGrid();   /* сетка создаётся лениво: вывод появляется сразу,
+                           даже если терминал открыли впервые на этой команде */
     termPutStr(String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
   }
 
@@ -413,13 +413,8 @@
       : (terminalInput ? terminalInput.value : terminalLine);
     terminalLine = '';
     if (terminalInput) terminalInput.value = '';
-    /* курсор сетки на пустую последнюю строку: эхо-строка "> text" будет
-       перезаписана выводом команды, как в оригинальном telnet-терминале */
-    termCurX = 0;
-    termCurY = TERM_ROWS - 1;
-    if (command.trim()) terminalCommands.push(command);
-    terminalHistoryIndex = terminalCommands.length;
-    terminalHistoryDraft = '';
+    /* выводим набранную строку в сетку ДО команды, как эхо telnet-сервера:
+       курсор сам уходит на следующую строку через termAppend('\n') */
     runTerminalCommand(command);
   }
 
@@ -501,6 +496,9 @@
 
   function runTerminalCommand(command) {
     var source = String(command || '').trim();
+    if (source.trim()) terminalCommands.push(source);
+    terminalHistoryIndex = terminalCommands.length;
+    terminalHistoryDraft = '';
     if (!source) return;
     termPrint('> ' + source + '\n');
     var firstSpace = source.indexOf(' ');
@@ -893,6 +891,10 @@
   function loop() {
     if (!window.KaDOS) { setTimeout(loop, 100); return; }
     var out = KaDOS.runSlice(BUDGET);
+    /* getConsole() в kados.js ВОЗВРАЩАЕТ И ОЧИЩАЕТ буфер — данные нужно
+       брать ровно один раз за кадр. (Раньше здесь вызывалось getConsole()
+       дважды: второй вызов возвращал пустую строку, и вывод эмулятора
+       терялся целиком — «терминал ничего не выводит».) */
     var s = KaDOS.getConsole();
     if (s) {
       consoleText += s; mode = 'text';

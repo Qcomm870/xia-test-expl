@@ -22,6 +22,11 @@
   var dpadDebugToken = 0;
   /* Пустой экран при первом открытии: без баннеров, как в Terminal от Affe Null. */
   var terminalHistory = '';
+  /* v0.2.63: приглашение терминала в стиле оригинального Terminal от Affe Null
+     (у него был telnet-сервер и bash-промпт "bash-4.2$ "; у нас локальная
+     DOS-консоль KaDOS — промпт "root@kaios:~# "). Никакого баннера
+     "Welcome to KaDOS" больше нет — экран при открытии чистый, как в оригинале. */
+  var TERM_PROMPT = 'root@kaios:~# ';
   var terminalLine = '';
   var terminalInput = document.getElementById('terminal-input');
   var terminalCommands = [];
@@ -43,7 +48,14 @@
   ];
   var t9Key = -1;            // индекс текущей клавиши-группы
   var t9Index = 0;           // индекс символа внутри группы
-  var t9Timer = null;        // задержка «добора» символа
+  var t9Timer = null;        // задержка «добора» символа (как sendTimeoutId=setTimeout(send,1000) в оригинале)
+  /* v0.2.64: длинное нажатие (long-press). На Nokia 800 Tough удержание
+     аппаратной цифры НЕ генерирует keydown-автоповтор с e.repeat=true —
+     KaiOS шлёт один keydown и потом KeyPress-события (или молчит), поэтому
+     раньше «задерживаешь кнопку — вводится только первая буква». Теперь:
+     при keydown цифры запускаем интервал 500мс, который сам циклически
+     листает группу (a->b->c...), как multi-tap. Остановка — keyup/keyup-like
+     события, ввод команды, переключение регистра и т.п. */
   var t9Upper = false;       // переключатель регистра (#)
   var t9Control = false;     // режим Ctrl (Call)
   var t9BufferEl = document.getElementById('t9-buffer');
@@ -70,96 +82,245 @@
     return group[index % group.length];
   }
 
+  /* v0.2.66: строка ввода живёт в самой putChar-сетке (после промпта), как в
+     оригинальном Terminal (Affe Null) — отдельная нижняя панель с дублем
+     буфера убрана из index.html, чтобы не перекрывать обзор. Каретка —
+     персонажный символ '_' на месте курсора движка: ставится/снимается
+     точечно через DOM-ячейку (setCellAt), без перерисовки всей сетки. */
+  var CARET_CH = '\u0001';   // служебный код: рисуем '_', движок его не печатает
+  var caretCell = null;      // DOM-ячейка под кареткой (для восстановления)
+  var caretSaved = ' ';
+
+  function termCellEl(x, y) {
+    if (!termEngine || !termEngine.cellAt) return null;
+    return termEngine.cellAt(x, y);
+  }
+
+  function placeCaret() {
+    removeCaret();
+    if (!terminalIsOpen() || !termEngine) return;
+    var c = termEngine.getCursor();
+    var el = termCellEl(c.x, c.y);
+    if (!el) return;
+    caretCell = el;
+    caretSaved = el.textContent || ' ';
+    el.textContent = '_';
+  }
+
+  function removeCaret() {
+    if (caretCell) {
+      try { caretCell.textContent = caretSaved === CARET_CH ? ' ' : caretSaved; } catch (e) {}
+      caretCell = null;
+    }
+  }
+
+  /* v0.2.65: очистка строки ввода в putChar-сетке (аналог посимвольного
+     backspace из оригинала, где telnet-эхо сервера зирало каждый '\\b').
+     У нас эха нет — eraseBack() затирает ячейку явно. terminalLine включает
+     pending-символ группы (он уже напечатан), поэтому просто стираем
+     terminalLine.length символов. */
+  function t9ClearInput() {
+    for (var bi = 0; bi < terminalLine.length; bi++) termPrint('\b');
+    terminalLine = '';
+    t9Key = -1;
+    t9Index = 0;
+  }
+
+  /* Как в оригинале Terminal от Affe Null: pending-символ печатается В ТОЙ ЖЕ
+     ячейке и циклически меняется при повторных нажатиях клавиши. Раньше он
+     показывался в скобках "[f]" после текста — выглядело как мусор перед
+     подтверждённой буквой. Теперь: committed text + сам символ + '|' каретка. */
   function t9VisiblePending() {
     if (t9Key < 0) return '';
     var ch = t9CharFor(t9Key, t9Index);
     if (/^[a-z]$/.test(ch)) ch = t9Upper ? ch.toUpperCase() : ch;
-    return '[' + ch + ']';
+    return ch;
   }
 
   /* Рендер строки состояния: Т9-режим + варианты текущей клавиши + буфер.
      ВАЖНО: раньше здесь был ранний return при отсутствии DOM-узлов — если
      index.html не догрузился, НЕ ОБНАРУЖИВАЛОСЬ НИ ВВОДА, НИ ВЫВОДА.
      Теперь узлы опциональны, а состояние всегда дублируется в hud. */
+  /* Синхронизация скрытого <input>: на KaiOS без него IME/T9-клавиатура
+     телефона не отдаёт события клавиш в window.keydown. Значение поля всегда
+     равно подтверждённому тексту буфера — автоподстановка игнорируется
+     (источник истины — наш multi-tap, как в Terminal от Affe Null). */
+  function syncHiddenInput() {
+    if (!terminalInput) return;
+    try { terminalInput.value = t9CommittedText(); } catch (error) {}
+  }
+
   function t9Render() {
-    var text = t9CommittedText();
-    var visible = text + t9VisiblePending();
-    if (t9BufferEl && t9CaretEl) {
-      var node = document.createTextNode(visible);
-      while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild);
-      t9BufferEl.appendChild(node);
-      t9BufferEl.appendChild(t9CaretEl);
-    }
-    if (t9HintEl) {
-      var modeStr = (t9Control ? 'Ctrl ' : '') + (t9Upper ? 'ABC' : 'abc');
-      var options = t9Key >= 0 && t9Keys[t9Key] ? t9Keys[t9Key].join(' ') : '';
-      t9HintEl.textContent = modeStr + (options ? ' | ' + options : '');
-    }
-    terminalLine = text;
-    if (terminalInput) terminalInput.value = text;
-    if (hud) hud.textContent = '>' + (visible || ' ') + ' [' +
-      (t9Control ? 'CTRL ' : '') + (t9Upper ? 'ABC' : 'abc') + ']';
+    /* v0.2.66: ввод живёт ТОЛЬКО в putChar-сетке (как в оригинале Affe Null).
+       Нижняя панель-дубль (t9-buffer/hud-строка) убрана из index.html — она
+       перекрывала обзор и показывала то же самое второй раз. Здесь только:
+       скрытое поле для IME + каретка '_' на позиции курсора движка. */
+    syncHiddenInput();
+    if (terminalInput) terminalInput.value = terminalLine;
+    placeCaret();
   }
 
   function t9SetText(text) {
-    if (!t9BufferEl) return;
-    /* замена только текстового узла — caret-элемент не должен теряться */
-    var node = t9BufferEl.firstChild;
-    if (node && node.nodeType === 3) node.nodeValue = text;
-    else if (node) { while (t9BufferEl.firstChild) t9BufferEl.removeChild(t9BufferEl.firstChild); }
-    if (!t9BufferEl.firstChild || t9BufferEl.firstChild.nodeType !== 3) {
-      t9BufferEl.insertBefore(document.createTextNode(text), t9BufferEl.firstChild);
-    }
-    if (t9CaretEl && !t9BufferEl.contains(t9CaretEl)) t9BufferEl.appendChild(t9CaretEl);
+    terminalLine = text || '';
   }
 
-  function t9Commit() {
+  /* Фиксация текущей группы перед сменой режима (#/Call/SoftLeft):
+     символ уже напечатан в сетку, нужно лишь закрыть группу. */
+  function t9ForceCommit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    if (t9Key < 0) return;
-    var text = t9CommittedText();
-    var ch = t9CharFor(t9Key, t9Index);
+    t9StopHold();                        // v0.2.64: остановить long-press цикл
+    if (t9Key >= 0) { t9Key = -1; t9Index = 0; }
+  }
+
+/* v0.2.59 — модель ввода один-в-один как в оригинальном Terminal:
+     ЕДИНСТВЕННАЯ область вывода — сетка putChar (termEngine). Оригинал
+     печатал символ на КАЖДОМ нажатии клавиши сразу после сдвига индекса
+     (backspace + новый символ), без всякого таймера подтверждения.
+     Точно так же здесь: t9PressGroup мгновенно шлёт '\b'+ch в сетку,
+     pending живёт только в переменных t9Key/t9Index. Никакого «[f]»,
+     никакого дубляжа в t9-buffer/hud — они показывают ту же строку. */
+  function t9ApplyCase(ch) {
     if (/^[a-z]$/.test(ch)) {
       if (t9Control) ch = String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 0x40);
       else if (t9Upper) ch = ch.toUpperCase();
     }
-    text += ch;
-    t9SetText(text);
+    return ch;
+  }
+
+  /* Единственная точка печати ввода (аналог sock.send в оригинале). */
+  function t9SendRaw(ch) {
+    removeCaret();                       // каретка не должна мешать putChar
+    termPrint(ch);                       // putChar-сетка — единственный вывод
+    if (ch !== '\b') terminalLine += ch; // история строки для Enter/CLS
+  }
+
+  /* ВАЖНО (исправление v0.2.63): putChar оригинала при '\b' сдвигает каретку
+     НАЗАД, но НЕ затирает ячейку (стирание делает сервер своим эхом). У нас
+     эха нет, поэтому замена символа требует явной затирки ячейки перед
+     печатью нового — иначе старый символ остаётся под новым. */
+  function t9EraseCell() {
+    removeCaret();
+    if (termEngine && termEngine.eraseBack) termEngine.eraseBack();
+  }
+
+  /* Замена последнего символа в сетке: затереть ячейку, затем печать нового
+     (аналог send() в оригинале, где telnet-эхо перерисовывает позицию). */
+  function t9ReplaceLast(ch) {
+    t9EraseCell();
+    t9SendRaw(ch);
+    terminalLine = terminalLine.slice(0, -1) + ch;
+  }
+
+  /* Подтверждение группы в оригинале ничего не меняет визуально (символ
+     уже отправлен) — только сбрасывает состояние. Здесь то же самое. */
+  function t9Commit() {
+    if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    t9StopHold();                        // v0.2.64: отпускание/фиксация группы
     t9Key = -1;
     t9Index = 0;
-    t9Control = false;
+    t9Control = false;                   // Ctrl одноразовый (как control=false в send())
     t9Render();
   }
 
+  /* v0.2.60: поддержка УДЕРЖАНИЯ кнопки (key repeat). На Nokia 800 Tough при
+     долгом нажатии аппаратной клавиши KaiOS (Gecko) шлёт серию keydown с
+     event.repeat=true (как автоповтор). Раньше каждое повторное событие
+     вызывало t9PressGroup заново: оно попадало в ветку «первого нажатия»
+     (или сбрасывалось таймером) и всегда печатало ПЕРВУЮ букву группы —
+     поэтому «задерживаешь кнопку — вводится a, а не f».
+     Теперь: события с repeat=true циклически листают группу вперёд через
+     замену символа на месте (a->b->c...), ровно как многократные быстрые
+     нажатия. Задержал до нужной буквы — отпустил, она и остаётся. */
+  var lastT9DownAt = 0;
+
+  function t9AdvanceGroup(groupIndex) {
+    var group = t9Keys[groupIndex] || [String(groupIndex)];
+    t9Index = (t9Index + 1) % group.length;
+    t9ReplaceLast(t9ApplyCase(t9CharFor(groupIndex, t9Index)));
+  }
+
   /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
-  function t9PressGroup(groupIndex) {
+  function t9PressGroup(groupIndex, isRepeat) {
+    /* ВАЖНОЕ УПРОЩЕНИЕ v0.2.63: раньше здесь была эвристика «repeat по
+       интервалу <35мс», которая ломала обычный multi-tap: быстрое повторное
+       нажатие той же клавиши тоже попадало в неё, и символ улетал дальше по
+       группе без ведома пользователя — при отпускании оставалась НЕ та буква,
+       на которой остановились. В ОРИГИНАЛЕ (app.js Affe Null) никакой
+       детекции повторов нет вообще: каждое keydown = сдвиг индекса группы
+       (currentKey==num -> index+1 % len), подтверждение — только таймером
+       1000 мс или Enter/Backspace/#/Call/SoftLeft. Делаем ровно так же. */
+    void isRepeat;
     var group = t9Keys[groupIndex] || [String(groupIndex)];
     if (t9Key === groupIndex) {
-      t9Index = (t9Index + 1) % group.length;
+      /* повторное нажатие ТОЙ ЖЕ клавиши до истечения таймера: цикл по группе,
+         замена символа на месте в putChar-сетке (a->b->c->a...) */
+      t9AdvanceGroup(groupIndex);
     } else {
-      if (t9Key >= 0) t9Commit();
+      /* первая печать новой клавиши: символ сразу виден (как telnetSend в
+         onkeydown оригинала); если была открыта старая группа — она просто
+         фиксируется (символ уже напечатан, backspace не нужен) */
       t9Key = groupIndex;
       t9Index = 0;
+      t9SendRaw(t9ApplyCase(t9CharFor(groupIndex, 0)));
     }
-    t9Render();
     if (t9Timer) clearTimeout(t9Timer);
+    /* таймер фиксирует конец группы (sendTimeoutId=setTimeout(send,1000)
+       в оригинале): через секунду следующее нажатие начнёт НОВЫЙ символ. */
     t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    /* v0.2.66: старт long-press цикла — листает группу, пока кнопка удержана */
+    t9StartHold(groupIndex);
+    t9Render();
+  }
+
+  /* v0.2.66: ВОССТАНОВЛЕН long-press цикл — но теперь он работает как в
+     настоящем Nokia multi-tap. Причина жалоб «надо задерживать кнопку, и то
+     вводится первая буква»: KaiOS при удержании НЕ шлёт keydown.repeat,
+     поэтому без локального цикла было нечем листать группу. Цикл 300мс
+     сдвигает индекс (a->b->c...) и печатает символ ЗАМЕНой на месте
+     (eraseBack + putChar), как telnet-эхо в оригинале Affe Null.
+     Остановка: keyup (см. обработчик keyup), Enter/Backspace/#/Call. */
+  var t9HoldInterval = null;
+  function t9StartHold(groupIndex) {
+    t9StopHold();
+    t9HoldInterval = setInterval(function () {
+      if (!terminalIsOpen() || t9Key !== groupIndex) { t9StopHold(); return; }
+      t9AdvanceGroup(groupIndex);
+      /* продлеваем commit-таймер, чтобы группа не закрылась во время удержания */
+      if (t9Timer) clearTimeout(t9Timer);
+      t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    }, 300);
+  }
+  function t9StopHold() {
+    if (t9HoldInterval) { clearInterval(t9HoldInterval); t9HoldInterval = null; }
   }
 
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    if (t9Key >= 0) { t9Key = -1; t9Index = 0; t9Render(); return; }
-    var text = t9CommittedText();
-    if (text.length) {
-      t9SetText(text.slice(0, -1));
+    t9StopHold();                        // v0.2.64: остановить long-press цикл
+    if (t9Key >= 0) {
+      /* как в оригинале: пока идёт набор группы, Backspace ОТМЕНЯЕТ её
+         (clearTimeout, currentKey=-1); символ уже напечатан в сетку —
+         стираем его затиркой ячейки */
+      t9EraseCell();
+      terminalLine = terminalLine.slice(0, -1);
+      t9Key = -1; t9Index = 0; t9Render(); return;
+    }
+    /* нет активного pending — стереть последний символ строки ввода:
+       каретка назад + затирка ячейки (у нас нет telnet-эха, см. выше) */
+    if (terminalLine.length) {
+      termPrint('\b');
+      t9EraseCell();
+      terminalLine = terminalLine.slice(0, -1);
       t9Render();
     }
   }
 
   function t9Submit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    t9Commit();
-    var command = t9CommittedText();
-    t9SetText('');
+    t9StopHold();                        // v0.2.64: остановить long-press цикл
+    t9Key = -1; t9Index = 0;             // группа зафиксирована (символ уже в сетке)
+    var command = terminalLine;          // строка уже набрана эхом в сетке
+    terminalLine = '';
     t9Render();
     submitTerminalLine(command);
   }
@@ -226,141 +387,92 @@
     return panel && !panel.classList.contains('hidden');
   }
 
-  /* ===== Полностью порт движка Terminal от Affe Null (app.js) =====
-     Сетка 20x13, putChar/newLine/setChar один-в-один как в оригинале.
-     Никаких баннеров («Welcome to KaDOS» убран), вывод появляется сразу,
-     строка ввода — отдельный DOM-узел под сеткой (ничего не перекрывает). */
-  var TERM_COLS = 20;   // maxx в оригинале (240px / 18px Droid Sans Mono)
-  var TERM_ROWS = 13;   // maxy в оригинале
-  var termGridEl = null;
-  var termChars = [];   // chars[y][x] = span-элементы, как в оригинале
-  var termCurX = 0, termCurY = 0;
+  /* ===== v0.2.59: встроен ОРИГИНАЛЬНЫЙ движок Terminal от Affe Null =====
+     Файл js/termgrid.js — дословный порт app.js (putChar/newLineAt/
+     removeLineAt/newLine/setChar/ANSI), без самописных упрощений.
+     Единственное отличие от оригинала: вместо telnet-сокета события шлются
+     в консоль KaDOS (onSend -> KaDOS.pressKey). Сетка 20x13, как в оригинале. */
+  var termEngine = null;
 
   function ensureTermGrid() {
-    if (!termGridEl) termGridEl = document.getElementById('terminal-output');
-    if (termGridEl && !termChars.length) {
-      termGridEl.innerHTML = '';
-      for (var i = 0; i < TERM_ROWS; i++) {
-        var lineEl = document.createElement('span');
-        var rowArr = [];
-        for (var j = 0; j < TERM_COLS; j++) {
-          var chEl = document.createElement('span');
-          chEl.textContent = ' ';
-          rowArr.push(chEl);
-          lineEl.appendChild(chEl);
-        }
-        termChars.push(rowArr);
-        termGridEl.appendChild(lineEl);
-        termGridEl.appendChild(document.createElement('br'));
-      }
+    var el = document.getElementById('terminal-output');
+    if (!el) return null;
+    if (!termEngine) {
+      termEngine = window.TermGrid.create(el);
     }
-    return termGridEl;
-  }
-
-  /* setChar из оригинала: печать символа в ячейку */
-  function termSetChar(x, y, ch) {
-    var cell = termChars[y] && termChars[y][x];
-    if (cell) cell.textContent = ch;
-  }
-
-  /* newLine из оригинала: сдвиг экрана вверх, новая пустая строка снизу */
-  function termNewLine() {
-    var firstLine = termGridEl.firstChild;
-    if (firstLine) termGridEl.removeChild(firstLine);           // span строки
-    var second = termGridEl.firstChild;
-    if (second && second.nodeName === 'BR') termGridEl.removeChild(second);
-    termChars.shift();
-    var lineEl = document.createElement('span');
-    var rowArr = [];
-    for (var j = 0; j < TERM_COLS; j++) {
-      var chEl = document.createElement('span');
-      chEl.textContent = ' ';
-      rowArr.push(chEl);
-      lineEl.appendChild(chEl);
-    }
-    termChars.push(rowArr);
-    termGridEl.appendChild(lineEl);
-    termGridEl.appendChild(document.createElement('br'));
-  }
-
-  /* putChar из оригинала: посимвольный рендер с переносом и скроллом.
-     ВАЖНО (исправление v0.2.50): в оригинале после \n курсор НЕ сбрасывается
-     в X=0 — строки "HELP\nFILES" печатались слитной строкой. У DOS-консоли
-     перевод строки = CRLF, поэтому здесь \n делает ещё и termCurX=0. */
-  function termPutChar(ch) {
-    ensureTermGrid();
-    if (!termChars.length) return;
-    if (ch === '\n') {
-      if (termCurY >= TERM_ROWS - 1) termNewLine();
-      else termCurY++;
-      termCurX = 0;
-      return;
-    }
-    if (ch === '\r') { termCurX = 0; return; }
-    if (ch === '\b') {
-      if (termCurX > 0) { termCurX--; termSetChar(termCurX, termCurY, ' '); }
-      return;
-    }
-    if (ch.charCodeAt(0) < 0x20) return;                        // прочие control — игнор
-    if (termCurX >= TERM_COLS) {                                // wrap как в оригинале
-      termCurX = 0;
-      if (termCurY >= TERM_ROWS - 1) termNewLine();
-      else termCurY++;
-    }
-    termSetChar(termCurX, termCurY, ch);
-    termCurX++;
-  }
-
-  /* putStr из оригинала */
-  function termPutStr(str) {
-    for (var i = 0; i < str.length; i++) termPutChar(str.charAt(i));
+    return el;
   }
 
   /* Полный сброс и перерисовка истории (для CLS / FILES и т.п.) */
   function renderTerminal() {
     ensureTermGrid();
-    if (!termGridEl) return;
-    while (termGridEl.firstChild) termGridEl.removeChild(termGridEl.firstChild);
-    termChars = [];
-    termCurX = 0; termCurY = 0;
-    for (var i = 0; i < TERM_ROWS; i++) termNewLine();
-    var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    termPutStr(text);
-    /* getConsole() очищает буфер kados.js — здесь она пустая; флаг дельты
-       синхронизируем на всякий случай, чтобы termAppendEmuDelta не печатал
-       повторно то, что уже в consoleText/истории */
-    lastEmuConsoleLength = (window.KaDOS && window.KaDOS.getConsole)
-      ? String(window.KaDOS.getConsole() || '').length : 0;
+    if (!termEngine) return;
+    /* v0.2.64: НЕ пересоздаём сетку каждый кадр. Раньше здесь был полный
+       reset + перепечатка terminalHistory — это (а) затирало pending-символ
+       T9, который уже напечатан в сетку, и (б) вызывал мерцание при каждом
+       keydown через loop(). Пересборка из истории нужна только после CLS /
+       открытия терминала — эти места вызывают renderTerminalFull(). */
+    termCharsOk = true;
   }
 
-  /* Инкрементальный вывод без полного redraw (главный путь для loop()).
-     Вывод эмулятора (consoleText) печатается ТОЛЬКО новыми символами —
-     иначе каждый кадр перепечатывался весь буфер и экран «не двигался». */
-  var lastEmuConsoleLength = 0;
+  function renderTerminalFull() {
+    ensureTermGrid();
+    if (!termEngine) return;
+    removeCaret();                       // reset пересоздаёт DOM-ячейки
+    termEngine.reset();
+    var text = terminalHistory.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    termEngine.putStr(text);
+    /* если идёт набор группы — эхо строки ввода уже в истории; ничего не
+       допечатываем */
+    termCharsOk = true;
+    placeCaret();                        // каретка после восстановленной строки
+  }
+
+  function termEngineResetAndPrompt() {
+    removeCaret();
+    if (termEngine && termEngine.reset) termEngine.reset();
+    termPrint(TERM_PROMPT);
+    placeCaret();
+  }
+
+  var termCharsOk = false;   // сетка реально создана (движок пишет в DOM)
 
   function termAppend(text) {
-    ensureTermGrid();   /* сетка создаётся лениво: вывод появляется сразу,
-                           даже если терминал открыли впервые на этой команде */
-    termPutStr(String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+    if (!text) return;
+    var norm = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    /* v0.2.66: история должна повторять поведение движка putChar — раньше
+       '\\b' просто конкатенировался в terminalHistory, и renderTerminalFull()
+       при перерисовке печатал backspace-мусор (сдвиги, дырки в тексте).
+       Теперь: '\\b' затирает последний символ истории (как eraseBack в сетке),
+       простой моделью: backspace удаляет предшествующий символ. */
+    for (var hi = 0; hi < norm.length; hi++) {
+      var hch = norm.charAt(hi);
+      if (hch === '\b') terminalHistory = terminalHistory.slice(0, -1);
+      else terminalHistory += hch;
+    }
+    ensureTermGrid();
+    if (termEngine) {
+      removeCaret();                     // вывод затрёт ячейку под кареткой
+      termEngine.putStr(norm);
+      termCharsOk = true;
+    }
   }
 
-  function termAppendEmuDelta() {
-    if (!window.KaDOS || !window.KaDOS.getConsole) return;
-    var full = String(window.KaDOS.getConsole() || '');
-    if (full.length <= lastEmuConsoleLength) {
-      /* программа перезапущена/буфер сброшен — перерисовать с нуля */
-      if (full.length < lastEmuConsoleLength) {
-        lastEmuConsoleLength = 0;
-        termAppendEmuDelta();
-      }
-      return;
-    }
-    var delta = full.slice(lastEmuConsoleLength);
-    lastEmuConsoleLength = full.length;
-    termAppend(delta);
+  /* Единый путь вывода: движок оригинала + копия в terminalHistory
+     (для CLS/redraw). Больше никаких параллельных рендеров. */
+  function termPrint(text) {
+    if (!text) return;
+    termAppend(text);
+  }
+
+  /* Инкрементный вывод дельты эмулятора: через тот же termPrint
+     (putChar + история), без второго пути записи. */
+  function termPrintEmuDelta(text) {
+    termPrint(text);
   }
 
   function closeTerminal() {
+    removeCaret();                       // каретка видна только в терминале
     var panel = document.getElementById('terminal-panel');
     if (panel) {
       panel.classList.add('hidden');
@@ -409,23 +521,58 @@
   }
 
   function submitTerminalLine(forcedCommand) {
-    var command = typeof forcedCommand === 'string' ? forcedCommand
-      : (terminalInput ? terminalInput.value : terminalLine);
+    var command;
+    if (typeof forcedCommand === 'string') {
+      command = forcedCommand;
+    } else if (terminalLine) {
+      /* v0.2.65: штатный путь — T9-эхо уже напечатало строку в putChar-сетку
+         (каждый символ через t9SendRaw), источник истины terminalLine. */
+      command = terminalLine;
+    } else {
+      /* вызов не из T9-пути (form.submit с автоподстановкой): строка не была
+         напечатана эхом — печатаем '> команда', как telnet-echo */
+      command = terminalInput ? terminalInput.value : '';
+      termPrint('> ' + command);
+    }
     terminalLine = '';
     if (terminalInput) terminalInput.value = '';
-    /* выводим набранную строку в сетку ДО команды, как эхо telnet-сервера:
-       курсор сам уходит на следующую строку через termAppend('\n') */
-    runTerminalCommand(command);
+    /* ЭХО набранной строки — как в оригинале Terminal от Affe Null: символы
+       уже напечатаны в putChar-сетку по мере нажатия клавиш (t9SendRaw),
+       поэтому здесь НЕ печатаем "> команда" целиком (иначе дубль).
+       Печатаем только перевод строки перед выводом результата. */
+    removeCaret();                       // каретка мешала бы '\n'
+    termPrint('\n');
+    runTerminalCommand(command, true);
+    /* v0.2.63: как промпт "bash-4.2$ " в оригинале — после вывода команды
+       всегда печатается приглашение для следующей строки */
+    termPrint(TERM_PROMPT);
+    placeCaret();                        // каретка на новую строку ввода
   }
 
-  /* T9-обработчик: возвращает true, если событие перехвачено */
+  /* T9-обработчик: возвращает true, если событие перехвачено.
+     ВАЖНО (исправление v0.2.52): на Nokia 800 Tough цифры приходят как
+     e.key='2' ИЛИ как keyCode=50, а навигационные клавиши D-pad — как
+     keyCode 21/22/20 (Legacy Gecko). normalizeDeviceKey превращает их в
+     Arrow*, и раньше стрелки «проглатывались» без preventDefault — фокус
+     уходил с поля ввода, ввод ломался. Теперь в терминале обрабатываются
+     keyCode цифр напрямую, а любая необработанная клавиша гасится. */
   function handleT9Key(event, key) {
     if (!terminalIsOpen()) return false;
     var num = null;
-    if (key >= '0' && key <= '9') num = Number(key);
+    if (key >= '0' && key <= '9' && key.length === 1) num = Number(key);
     else if (/^Digit[0-9]$/.test(key || '')) num = Number(key.charAt(5));
     else if (/^Numpad[0-9]$/.test(key || '')) num = Number(key.charAt(6));
+    if (num === null && typeof event.keyCode === 'number') {
+      var kcd = event.keyCode;
+      if (kcd >= 48 && kcd <= 57) num = kcd - 48;               // верхний ряд цифр
+      else if (kcd >= 96 && kcd <= 105) num = kcd - 96;         // Numpad
+    }
     if (num !== null) {
+      /* v0.2.66: модель оригинала Affe Null (multi-tap повторными нажатиями,
+         commit-таймер 1000мс) + локальный long-press цикл: KaiOS при удержании
+         не шлёт keydown.repeat, поэтому группу листает t9StartHold (стартует
+         здесь, останавливается по keyup). Символ печатается заменой на месте,
+         так что «задержал кнопку» -> a->b->c и остаётся нужная буква. */
       t9PressGroup(num);
       event.preventDefault();
       event.stopPropagation();
@@ -446,7 +593,11 @@
     if (key === '#') {
       event.preventDefault();
       event.stopPropagation();
-      if (t9Key >= 0) t9Commit();
+      /* ВАЖНО (исправление v0.2.54): раньше здесь читался t9CommittedText()
+         ДО подтверждения pending-символа — строкаHistory перезаписывалась без
+       последней буквы, и следующая нажатая клавиша «возвращала» её ([f] -> f).
+       Сначала принудительный commit, потом чтение. */
+      t9ForceCommit();
       t9Upper = !t9Upper;
       t9Render();
       return true;
@@ -454,7 +605,7 @@
     if (key === 'Call') {
       event.preventDefault();
       event.stopPropagation();
-      if (t9Key >= 0) t9Commit();
+      t9ForceCommit();
       t9Control = !t9Control;
       t9Render();
       return true;
@@ -462,8 +613,10 @@
     if (key === 'SoftLeft') {
       event.preventDefault();
       event.stopPropagation();
-      if (t9Key >= 0) t9Commit();
-      t9SetText(t9CommittedText() + ' ');
+      /* как в оригинале: сначала send() pending-группы, затем печать пробела
+         (в Terminal от Affe Null SoftLeft = Tab '\t'; у нас пробел нужнее) */
+      t9ForceCommit();
+      t9SendRaw(' ');
       t9Render();
       return true;
     }
@@ -473,34 +626,43 @@
   function terminalHistoryMove(direction) {
     if (!terminalCommands.length) return;
     if (terminalHistoryIndex === terminalCommands.length && direction === 'ArrowUp') {
-      terminalHistoryDraft = terminalInput ? terminalInput.value : terminalLine;
+      terminalHistoryDraft = terminalLine;
     }
     var result = window.KaLoader.navigateCommandHistory(terminalCommands, terminalHistoryIndex, direction);
     terminalHistoryIndex = result.index;
     var command = terminalHistoryIndex === terminalCommands.length ? terminalHistoryDraft : result.command;
-    /* показываем выбранную историю прямо в видимый T9-буфер */
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    /* v0.2.65: eraseLen больше НЕ прибавляет +1 за pending-символ — он уже
+       входит в terminalLine (t9SendRaw печатает его и добавляет в строку),
+       поэтому лишняя затирка съедала предыдущий символ. */
+    var eraseLen = terminalLine.length;
+    removeCaret();                       // затирка строки — без каретки
+    for (var bi = 0; bi < eraseLen; bi++) termPrint('\b');
     t9Key = -1;
     t9Index = 0;
-    t9SetText(command || '');
-    t9Render();
+    terminalLine = '';
+    termPrint(command || '');
+    terminalLine = command || '';
+    t9Render();                          // внутри поставит каретку
   }
 
-  /* Вывод строки в терминал: история + putChar-сетка (как putStr в оригинале).
-     renderTerminal() вызывается только для CLS/FILES — инкрементальный путь
-     не делает полный redraw каждый кадр. */
-  function termPrint(text) {
-    terminalHistory += text;
-    if (terminalIsOpen()) termAppend(text);
-  }
+  /* (v0.2.53) Старый termPrint удалён — единый рендер вывода выше
+     (putChar-сетка + terminalHistory). */
 
-  function runTerminalCommand(command) {
+  function runTerminalCommand(command, echoAlreadyPrinted) {
     var source = String(command || '').trim();
-    if (source.trim()) terminalCommands.push(source);
+    /* История команд: раньше push делался только здесь и без дедупа —
+       добавляем и последнюю набранную команду из submitTerminalLine. */
+    if (source.trim() &&
+        terminalCommands[terminalCommands.length - 1] !== source.trim()) {
+      terminalCommands.push(source.trim());
+    }
     terminalHistoryIndex = terminalCommands.length;
     terminalHistoryDraft = '';
     if (!source) return;
-    termPrint('> ' + source + '\n');
+    /* Эхо "> команда" печатает submitTerminalLine (v0.2.53); здесь — только
+       если команда вызвана программно (без флага), чтобы не печатать дважды. */
+    if (!echoAlreadyPrinted) termPrint('> ' + source + '\n');
     var firstSpace = source.indexOf(' ');
     var name = (firstSpace < 0 ? source : source.slice(0, firstSpace)).toUpperCase();
     var argument = firstSpace < 0 ? '' : source.slice(firstSpace + 1).trim();
@@ -525,7 +687,8 @@
     } else if (name === 'CLS') {
       terminalHistory = '';
       consoleText = '';
-      renderTerminal();
+      /* как в оригинальном Terminal: после очистки остаётся только приглашение */
+      termEngineResetAndPrompt();
     } else if (name === 'EXIT') {
       closeTerminal();
       return;
@@ -543,7 +706,11 @@
           window.KaDOS.pressKey(code);
         }
         if (nonAscii) termPrint('DOS input accepts ASCII text only.\n');
-        else window.KaDOS.pressKey(13);
+        else {
+          window.KaDOS.pressKey(13);
+          /* подтверждение для пользователя: что именно отправлено в DOS-программу */
+          termPrint('Sent to ' + (programName || 'DOS') + ': "' + argument + '"\n');
+        }
       }
     } else if (name === 'FILES' || name === 'RUN') {
       /* встроенные демо (HELLO/ECHO/COUNT) ищем сразу — без SD-сканирования;
@@ -577,9 +744,8 @@
       if (!window.navigator || (typeof window.navigator.getDeviceStorages !== 'function' &&
           typeof window.navigator.getDeviceStorage !== 'function')) {
         if (name === 'FILES') {
-          terminalHistory += ((window.KaLoader && window.KaLoader.DEMOS) || [])
-            .map(function (d) { return d.name + ' (built-in)'; }).join('\n') + '\n';
-          renderTerminal();
+          termPrint(((window.KaLoader && window.KaLoader.DEMOS) || [])
+            .map(function (d) { return d.name + ' (built-in)'; }).join('\n') + '\n');
         } else {
           runFromDemos();
         }
@@ -588,10 +754,9 @@
       window.KaLoader.listSdFiles().then(function (items) {
         var programs = items.filter(function (item) { return /\.(com|bin)$/i.test(item.name || item.path || ''); });
         if (name === 'FILES') {
-          terminalHistory += programs.length
+          termPrint(programs.length
             ? programs.map(function (item) { return item.name; }).join('\n') + '\n'
-            : 'No COM/BIN files found.\n';
-          renderTerminal();
+            : 'No COM/BIN files found.\n');
           return;
         }
         if (!argument) {
@@ -635,26 +800,29 @@
     if ((!key || key.length > 1) && typeof event.keyCode === 'number') {
       var kc = event.keyCode;
       if (kc >= 48 && kc <= 57) key = String(kc - 48);            // цифры
+      else if (kc >= 96 && kc <= 105) key = String(kc - 96);      // Numpad-цифры
       else if (kc >= 65 && kc <= 90) key = String.fromCharCode(kc + 32); // буквы -> нижний регистр
-      else if (kc === 13) key = 'Enter';
+      else if (kc === 13 || kc === 23) key = 'Enter';
       else if (kc === 8) key = 'Backspace';
-      else if (kc === 27 || kc === 17) key = 'Back';              // Esc / GoBack на KaiOS
+      else if (kc === 27 || kc === 17 || kc === 461 || kc === 10009) key = 'Back'; // Esc/GoBack на KaiOS
+    }
+    /* Пробел: e.key=' ' или legacy-алиас 'Enter' от Space — печатаем пробел.
+       В терминале Enter это ввод команды, поэтому алиас проверяем по keyCode. */
+    if (key === ' ' || (key === 'Enter' && (event.keyCode === 32 || event.code === 'Space'))) {
+      if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+      t9Key = -1; t9Index = 0;
+      t9SendRaw(' ');                    // единственный рендер ввода
+      t9Render();
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
     }
     /* Буквы с аппаратной клавиатуры KaiOS (e.key = 'h' и т.п.) — пишем в буфер */
     if (key && key.length === 1 && /[a-zа-яё]/i.test(key)) {
       var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
       t9Key = -1; t9Index = 0;
-      t9SetText(t9CommittedText() + ch);
-      t9Render();
-      event.preventDefault();
-      event.stopPropagation();
-      return true;
-    }
-    if (key === ' ') {
-      if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-      t9Key = -1; t9Index = 0;
-      t9SetText(t9CommittedText() + ' ');
+      t9SendRaw(ch);                     // единственный рендер ввода
       t9Render();
       event.preventDefault();
       event.stopPropagation();
@@ -664,6 +832,9 @@
     if (handleT9Key(event, key)) return true;
     if (key === 'ArrowUp' || key === 'ArrowDown') {
       terminalHistoryMove(key);
+    } else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      /* в терминале боковые стрелки не двигают каретку (буфер однострочный,
+         каретка всегда в конце) — гасим, чтобы не сбивать фокус */
     } else if (key === 'Back' || key === 'Escape' || key === 'SoftRight') {
       closeTerminal();
     } else {
@@ -900,8 +1071,9 @@
       consoleText += s; mode = 'text';
       /* Инкрементальный вывод через putChar-порт (как sock.ondata -> putStr
          в оригинале Terminal от Affe Null): без полного redraw каждый кадр,
-        символы появляются сразу. */
-      if (terminalIsOpen()) termAppend(s);
+        символы появляются сразу. Дельта также попадает в terminalHistory,
+        чтобы после CLS/полного redraw вывод программы не терялся. */
+      termPrintEmuDelta(s);
     }
     if (KaDOS.vgaDirtyConsume()) mode = 'vga';
     if (mode === 'vga') drawVga(); else drawText();
@@ -1045,10 +1217,27 @@
     return false;
   }
 
+  window.addEventListener('keyup', function (e) {
+    if (terminalIsOpen()) t9StopHold();
+  });
+
   window.addEventListener('keydown', function (e) {
+    /* v0.2.63: эвристика автоповтора (<35мс) УДАЛЕНА — она ломала обычный
+       multi-tap (быстрые повторные нажатия той же клавиши «улетали» дальше по
+       группе, и при отпускании оставалась не та буква). В оригинальном
+       Terminal от Affe Null никакого детектирования повторов нет: каждое
+       keydown просто сдвигает индекс группы, подтверждение — таймером 1000мс.
+       Теперь t9PressGroup делает ровно то же самое. */
     var key = normalizeKey(e);
     if (handleTerminalKey(e, key)) return;
-    if (terminalIsOpen()) return; // в терминале всё перехватывает T9/история
+    if (terminalIsOpen()) {
+      /* v0.2.64: keyup любой клавиши останавливает long-press цикл Т9
+         (оригинальный Terminal не нуждался — telnet-сервер сам эхом гнал
+         backspace; у нас цикл крутится локально и должен умирать по
+         отпусканию кнопки, иначе символ «убегает» дальше нужной буквы). */
+      if (e.type === 'keyup') t9StopHold();
+      return;
+    }
     var active = document.activeElement;
     var isTextField = active && /^(INPUT|TEXTAREA)$/.test(active.tagName);
     var mappedKey = fileListDirectionalKey(key);
@@ -1160,6 +1349,10 @@
       mode = 'text';
       programName = name;
       loadError = '';
+      /* экран эмулятора теперь показывает программу — терминал-оверлей
+         мешал бы («перекрывает всё собой»), скрываем его автоматически */
+      var tp = document.getElementById('terminal-panel');
+      if (tp && !tp.classList.contains('hidden')) closeTerminal();
     } catch (e) {
       loadError = e.message;
     }
@@ -1346,7 +1539,12 @@
       if (appShell) appShell.classList.add('terminal-mode');
       updateTerminalViewport();
       setTerminalOrientation(true);
-      renderTerminal();
+      /* v0.2.64: перерисовываем сетку из истории целиком (экран мог быть
+         очищен/пересобран), затем промпт если пусто */
+      renderTerminalFull();
+      /* v0.2.63: при первом открытии — чистый экран с промптом как в
+         оригинальном Terminal (никакого "Welcome to KaDOS") */
+      if (!terminalHistory) termPrint(TERM_PROMPT);
       t9Render();
       setTimeout(function () {
         /* фокус на скрытом поле: клавиши доходят до window.keydown, IME не мешает */

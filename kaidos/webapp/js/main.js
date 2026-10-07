@@ -135,6 +135,12 @@
     if (t9Key >= 0) t9Commit();
   }
 
+  /* КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ (v0.2.57): раньше pending-символ НЕ печатался в
+     сетку терминала до подтверждения — пользователь видел только «[f]» или
+     ничего. В оригинале Terminal от Affe Null символ уходит на сервер сразу
+     при первом нажатии и затем циклически заменяется через backspace.
+     Делаем то же самое: commit пишет символ в putChar-сетку ЭХОМ немедленно,
+     а replace-цикл сдвигает каретку назад на одну ячейку. */
   function t9Commit() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
     if (t9Key < 0) return;
@@ -144,35 +150,61 @@
       if (t9Control) ch = String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 0x40);
       else if (t9Upper) ch = ch.toUpperCase();
     }
+    var replacing = t9WasReplace;
     text += ch;
     t9SetText(text);
+    if (terminalIsOpen()) {
+      if (replacing) {
+        /* замена предыдущего символа группы: каретка назад на 1 ячейку */
+        termPrint('\b');
+      }
+      termPrint(ch);
+    }
     t9Key = -1;
     t9Index = 0;
     t9Control = false;
+    t9WasReplace = false;
     t9Render();
   }
+  var t9WasReplace = false;
 
   /* groupIndex == номер цифры клавиши (0..9), как в оригинале Affe Null */
   function t9PressGroup(groupIndex) {
     var group = t9Keys[groupIndex] || [String(groupIndex)];
     if (t9Key === groupIndex) {
+      /* повторное нажатие той же клавиши: старый pending-символ ещё НЕ был
+         напечатан в сетке (он жил только в буфере) — просто меняем индекс */
       t9Index = (t9Index + 1) % group.length;
+      t9Render();
     } else {
-      if (t9Key >= 0) t9Commit();
+      if (t9Key >= 0) { t9WasReplace = false; t9Commit(); }
       t9Key = groupIndex;
       t9Index = 0;
+      /* мгновенный эхо-вывод первого символа группы (как telnetSend в
+         оригинале): символ виден СРАЗУ, не нужно ждать таймер добора */
+      var firstCh = t9CharFor(groupIndex, 0);
+      if (/^[a-z]$/.test(firstCh)) firstCh = t9Upper ? firstCh.toUpperCase() : firstCh;
+      if (terminalIsOpen()) termPrint(firstCh);
+      t9PendingEchoed = true;
+      t9Render();
     }
-    t9Render();
     if (t9Timer) clearTimeout(t9Timer);
-    t9Timer = setTimeout(function () { t9Commit(); }, 1000);
+    t9Timer = setTimeout(function () { t9WasReplace = t9PendingEchoed; t9Commit(); }, 1000);
   }
+  var t9PendingEchoed = false;
 
   function t9Backspace() {
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-    if (t9Key >= 0) { t9Key = -1; t9Index = 0; t9Render(); return; }
+    if (t9Key >= 0) {
+      /* сброс незавершённой группы: если первый символ уже был напечатан
+         эхом в сетку — стереть его там же ('\b' ставит пробел и назад) */
+      if (t9PendingEchoed && terminalIsOpen()) termPrint('\b');
+      t9Key = -1; t9Index = 0; t9PendingEchoed = false; t9Render(); return;
+    }
     var text = t9CommittedText();
     if (text.length) {
       t9SetText(text.slice(0, -1));
+      if (terminalIsOpen()) termPrint('\b');
       t9Render();
     }
   }
@@ -182,9 +214,11 @@
     /* ВАЖНО (исправление v0.2.54): раньше commit шёл ПОСЛЕ чтения буфера —
        последний pending-символ терялся ("hel|lo" -> "hello" отправлялось как
        "hell"). Теперь сначала подтверждение, потом чтение. */
+    t9WasReplace = false;   /* pending ещё не в сетке — коммит без backspace */
     t9Commit();
     var command = t9CommittedText();
     t9SetText('');
+    t9PendingEchoed = false;
     t9Render();
     submitTerminalLine(command);
   }
@@ -462,12 +496,14 @@
     if (terminalInput) terminalInput.value = '';
     /* ЭХО набранной строки — как в оригинале Terminal от Affe Null: там
        telnet-сервер возвращает набранное обратно, и putChar печатает его в
-       сетку ДО вывода команды. Раньше эха не было вовсе («не видно введённых
-       символов» после Enter). Курсор сам уходит на следующую строку через
-       termAppend('\n'). */
-    if (String(command || '').length) {
-      termPrint('> ' + command + '\n');
-    }
+       сетку ДО вывода команды.
+
+       ВАЖНО (исправление v0.2.57): с мгновенным эхом ввода символы УЖЕ
+       напечатаны в сетке по мере нажатия клавиш. Поэтому здесь больше НЕ
+       печатаем "> команда" целиком (иначе было бы двойное отображение —
+       «f» потом ещё раз вся строка). Печатаем только приглашение ">" на
+       новой строке перед выводом результата. */
+    termPrint('\n');
     runTerminalCommand(command, true);
   }
 
@@ -548,9 +584,16 @@
     var command = terminalHistoryIndex === terminalCommands.length ? terminalHistoryDraft : result.command;
     /* показываем выбранную историю прямо в видимый T9-буфер */
     if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+    /* ВАЖНО (исправление v0.2.57): если была незавершённая группа с
+       мгновенным эхом в сетке — стереть её символ ('\b'), иначе введённый
+       вручную «h» останется в строке поверх подставленной истории */
+    if (t9Key >= 0 && t9PendingEchoed && terminalIsOpen()) termPrint('\b');
     t9Key = -1;
     t9Index = 0;
+    t9PendingEchoed = false;
     t9SetText(command || '');
+    /* саму команду истории НЕ печатаем в сетку — она видна в буфере ввода;
+       в оригинале telnet тоже присылает echo только когда сервер решит */
     t9Render();
   }
 
@@ -719,8 +762,9 @@
        В терминале Enter это ввод команды, поэтому алиас проверяем по keyCode. */
     if (key === ' ' || (key === 'Enter' && (event.keyCode === 32 || event.code === 'Space'))) {
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-      t9Key = -1; t9Index = 0;
+      t9Key = -1; t9Index = 0; t9PendingEchoed = false;
       t9SetText(t9CommittedText() + ' ');
+      termPrint(' ');   /* мгновенное эхо пробела в сетку (v0.2.57) */
       t9Render();
       event.preventDefault();
       event.stopPropagation();
@@ -730,8 +774,9 @@
     if (key && key.length === 1 && /[a-zа-яё]/i.test(key)) {
       var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();
       if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-      t9Key = -1; t9Index = 0;
+      t9Key = -1; t9Index = 0; t9PendingEchoed = false;
       t9SetText(t9CommittedText() + ch);
+      termPrint(ch);    /* мгновенное эхо символа в сетку (v0.2.57) */
       t9Render();
       event.preventDefault();
       event.stopPropagation();

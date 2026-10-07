@@ -407,6 +407,26 @@
 
   function handleTerminalKey(event, key) {
     if (!terminalIsOpen()) return false;
+    /* Буквы с аппаратной клавиатуры KaiOS (e.key = 'h' и т.п.) — пишем в буфер */
+    if (key && key.length === 1 && /[a-zа-яё]/i.test(key)) {
+      var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();
+      if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+      t9Key = -1; t9Index = 0;
+      if (t9BufferEl) t9BufferEl.textContent = t9CommittedText() + ch;
+      t9Render();
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+    if (key === ' ') {
+      if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+      t9Key = -1; t9Index = 0;
+      if (t9BufferEl) t9BufferEl.textContent = t9CommittedText() + ' ';
+      t9Render();
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
     /* T9 multi-tap: цифры, Backspace, Enter, #, Call, SoftLeft */
     if (handleT9Key(event, key)) return true;
     if (key === 'ArrowUp' || key === 'ArrowDown') {
@@ -414,7 +434,11 @@
     } else if (key === 'Back' || key === 'Escape' || key === 'SoftRight') {
       closeTerminal();
     } else {
-      return false;
+      /* Любая остальная клавиша в режиме терминала не должна уходить
+         навигации по кнопкам (иначе фокус «теряется» и ввод невозможен). */
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
     }
     renderTerminal();
     event.preventDefault();

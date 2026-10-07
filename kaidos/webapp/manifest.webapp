@@ -101,7 +101,7 @@
   },
   "fullscreen": true,
   "orientation": [
-    "landscape"
+    "portrait"
   ],
   "runtime_type": "gecko"
 }

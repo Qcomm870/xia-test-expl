@@ -35,16 +35,16 @@
 
   /* ===== T9 multi-tap ввод (как в Terminal от Affe Null) ===== */
   var t9Keys = [
-    [' ', '0'],
+    [' '],                 // 0: пробел (как в оригинале keys[0]=' ')
     ['.', ',', '?', '!', '1', ';', ':', '/', '@', '-', '+', '_', '=', '$', '|', '<', '>'],
-    ['a', 'b', 'c', '2'],
-    ['d', 'e', 'f', '3'],
-    ['g', 'h', 'i', '4'],
-    ['j', 'k', 'l', '5'],
-    ['m', 'n', 'o', '6'],
-    ['p', 'q', 'r', 's', '7'],
-    ['t', 'u', 'v', '8'],
-    ['w', 'x', 'y', 'z', '9']
+    ['a', 'b', 'c'],       // 2 — БЕЗ цифры в конце группы: раньше '2' замыкала
+    ['d', 'e', 'f'],       // цикл и «отпускаешь на f, а вводилось...» — теперь
+    ['g', 'h', 'i'],       // группа ровно abc/def/..., как в T9 Nokia. Цифры
+    ['j', 'k', 'l'],       // набираются через # (регистр) или долгим простоем
+    ['m', 'n', 'o'],       // на клавише 0/1 для спецсимволов; сами цифры —
+    ['p', 'q', 'r', 's'],  // отдельная раскладка выше не нужна: при пустом
+    ['t', 'u', 'v'],       // наборе одно нажатие клавиши даёт цифру (см.
+    ['w', 'x', 'y', 'z']   // handleT9Key: num без pending -> печать цифры).
   ];
   var t9Key = -1;            // индекс текущей клавиши-группы
   var t9Index = 0;           // индекс символа внутри группы
@@ -272,24 +272,16 @@
     t9Render();
   }
 
-  /* v0.2.66: ВОССТАНОВЛЕН long-press цикл — но теперь он работает как в
-     настоящем Nokia multi-tap. Причина жалоб «надо задерживать кнопку, и то
-     вводится первая буква»: KaiOS при удержании НЕ шлёт keydown.repeat,
-     поэтому без локального цикла было нечем листать группу. Цикл 300мс
-     сдвигает индекс (a->b->c...) и печатает символ ЗАМЕНой на месте
-     (eraseBack + putChar), как telnet-эхо в оригинале Affe Null.
-     Остановка: keyup (см. обработчик keyup), Enter/Backspace/#/Call. */
+  /* v0.2.67: УДАЛЁН long-press цикл полностью («без замарочек», по просьбе).
+     Именно он был причиной всех артефактов ввода: интервал крутился и после
+     keyup (на KaiOS keyup приходит не на все клавиши), поэтому символ
+     «убегал» дальше нужной буквы; а фиксация группы шла вразнобой с циклом,
+     из-за чего «вводится первая буква». Теперь ввод ровно как в оригинальном
+     Terminal от Affe Null: короткое повторное нажатие клавиши листает группу
+     (abc->def->ghi...), подтверждение — таймером 1000 мс или Enter.
+     t9StopHold оставлена заглушкой — вызывается во многих местах. */
   var t9HoldInterval = null;
-  function t9StartHold(groupIndex) {
-    t9StopHold();
-    t9HoldInterval = setInterval(function () {
-      if (!terminalIsOpen() || t9Key !== groupIndex) { t9StopHold(); return; }
-      t9AdvanceGroup(groupIndex);
-      /* продлеваем commit-таймер, чтобы группа не закрылась во время удержания */
-      if (t9Timer) clearTimeout(t9Timer);
-      t9Timer = setTimeout(function () { t9Commit(); }, 1000);
-    }, 300);
-  }
+  function t9StartHold(groupIndex) { void groupIndex; }
   function t9StopHold() {
     if (t9HoldInterval) { clearInterval(t9HoldInterval); t9HoldInterval = null; }
   }
@@ -432,6 +424,11 @@
     removeCaret();
     if (termEngine && termEngine.reset) termEngine.reset();
     termPrint(TERM_PROMPT);
+    /* v0.2.67: промпт — только визуальный, из истории вычитается (см. submitTerminalLine) */
+    var pl = TERM_PROMPT.length;
+    if (terminalHistory.slice(-pl) === TERM_PROMPT) {
+      terminalHistory = terminalHistory.slice(0, -pl);
+    }
     placeCaret();
   }
 
@@ -543,9 +540,15 @@
     removeCaret();                       // каретка мешала бы '\n'
     termPrint('\n');
     runTerminalCommand(command, true);
-    /* v0.2.63: как промпт "bash-4.2$ " в оригинале — после вывода команды
-       всегда печатается приглашение для следующей строки */
+    /* v0.2.67: история хранится БЕЗ промпта (как в оригинале: сервер держал
+       чистый буфер, а "bash-4.2$ " был лишь визуальным эхом). Промпт печатается
+       в сетку для вида, но из terminalHistory вычитается — иначе backspace и
+       перерисовки «съедали» хвост приглашения вместо символа пользователя. */
     termPrint(TERM_PROMPT);
+    var pl = TERM_PROMPT.length;
+    if (terminalHistory.slice(-pl) === TERM_PROMPT) {
+      terminalHistory = terminalHistory.slice(0, -pl);
+    }
     placeCaret();                        // каретка на новую строку ввода
   }
 
@@ -567,12 +570,17 @@
       if (kcd >= 48 && kcd <= 57) num = kcd - 48;               // верхний ряд цифр
       else if (kcd >= 96 && kcd <= 105) num = kcd - 96;         // Numpad
     }
+    /* v0.2.67: цифры 2-9 печатаются ОДНИМ нажатием, если pending-группы нет
+       (как в оригинале Affe Null). Иначе — multi-tap цикл по буквам группы. */
     if (num !== null) {
-      /* v0.2.66: модель оригинала Affe Null (multi-tap повторными нажатиями,
-         commit-таймер 1000мс) + локальный long-press цикл: KaiOS при удержании
-         не шлёт keydown.repeat, поэтому группу листает t9StartHold (стартует
-         здесь, останавливается по keyup). Символ печатается заменой на месте,
-         так что «задержал кнопку» -> a->b->c и остаётся нужная буква. */
+      if (num >= 2 && num <= 9 && t9Key < 0 && !t9Timer) {
+        event.preventDefault();
+        event.stopPropagation();
+        t9SendRaw(String(num));   // быстрая печать цифры без входа в группу
+        return true;
+      }
+      /* чистый multi-tap: быстрые повторные нажатия клавиши листают группу
+         (a->b->c), символ виден мгновенно, фиксация — таймером 1000 мс или Enter. */
       t9PressGroup(num);
       event.preventDefault();
       event.stopPropagation();
@@ -1544,7 +1552,7 @@
       renderTerminalFull();
       /* v0.2.63: при первом открытии — чистый экран с промптом как в
          оригинальном Terminal (никакого "Welcome to KaDOS") */
-      if (!terminalHistory) termPrint(TERM_PROMPT);
+      if (!terminalHistory) termEngineResetAndPrompt();
       t9Render();
       setTimeout(function () {
         /* фокус на скрытом поле: клавиши доходят до window.keydown, IME не мешает */

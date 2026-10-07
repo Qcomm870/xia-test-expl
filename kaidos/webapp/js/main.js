@@ -324,40 +324,42 @@
     termChars = [];
     termCurX = 0; termCurY = 0;
     for (var i = 0; i < TERM_ROWS; i++) termNewLine();
-    var text = (terminalHistory + consoleText).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    var text = terminalHistory.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    /* ВАЖНО (исправление v0.2.52): consoleText — это буфер ЭКРАНА эмулятора
+       (canvas), а не история терминала. Раньше он допечатывался сюда при
+       каждом полном redraw, из-за чего после HELP/FILES экран «засыпался»
+       старым выводом HELLO.COM и казалось, что вывода команд нет.
+       Вывод программ идёт в терминал только инкрементально через loop(). */
     termPutStr(text);
-    /* getConsole() очищает буфер kados.js — здесь она пустая; флаг дельты
-       синхронизируем на всякий случай, чтобы termAppendEmuDelta не печатал
-       повторно то, что уже в consoleText/истории */
     lastEmuConsoleLength = (window.KaDOS && window.KaDOS.getConsole)
       ? String(window.KaDOS.getConsole() || '').length : 0;
   }
 
   /* Инкрементальный вывод без полного redraw (главный путь для loop()).
-     Вывод эмулятора (consoleText) печатается ТОЛЬКО новыми символами —
-     иначе каждый кадр перепечатывался весь буфер и экран «не двигался». */
+     Вывод эмулятора печатается ТОЛЬКО новыми символами — иначе каждый кадр
+     перепечатывался весь буфер и экран «не двигался».
+
+     ВАЖНО (исправление v0.2.52): раньше эта функция нигде не вызывалась
+     («мёртвый код»), поэтому терминал НИЧЕГО не выводил из DOS-программ —
+     только ответы команд. Теперь дельта consoleBuf печатается в сетку после
+     каждой порции вывода в loop(). */
   var lastEmuConsoleLength = 0;
 
   function termAppend(text) {
     ensureTermGrid();   /* сетка создаётся лениво: вывод появляется сразу,
                            даже если терминал открыли впервые на этой команде */
-    termPutStr(String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+    var norm = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    terminalHistory += norm;
+    termPutStr(norm);
   }
 
-  function termAppendEmuDelta() {
-    if (!window.KaDOS || !window.KaDOS.getConsole) return;
-    var full = String(window.KaDOS.getConsole() || '');
-    if (full.length <= lastEmuConsoleLength) {
-      /* программа перезапущена/буфер сброшен — перерисовать с нуля */
-      if (full.length < lastEmuConsoleLength) {
-        lastEmuConsoleLength = 0;
-        termAppendEmuDelta();
-      }
-      return;
-    }
-    var delta = full.slice(lastEmuConsoleLength);
-    lastEmuConsoleLength = full.length;
-    termAppend(delta);
+  /* getConsole() ВОЗВРАЩАЕТ И ОЧИЩАЕТ consoleBuf (см. kados.js), поэтому
+     «дельта» — это просто весь непечатанный текст с прошлого вызова:
+     full.length всегда сравнивать с 0 бессмысленно, lastEmuConsoleLength
+    нужен только для renderTerminal-синхронизации. */
+  function termPrintEmuDelta(text) {
+    if (!text) return;
+    termAppend(text);
   }
 
   function closeTerminal() {
@@ -418,13 +420,24 @@
     runTerminalCommand(command);
   }
 
-  /* T9-обработчик: возвращает true, если событие перехвачено */
+  /* T9-обработчик: возвращает true, если событие перехвачено.
+     ВАЖНО (исправление v0.2.52): на Nokia 800 Tough цифры приходят как
+     e.key='2' ИЛИ как keyCode=50, а навигационные клавиши D-pad — как
+     keyCode 21/22/20 (Legacy Gecko). normalizeDeviceKey превращает их в
+     Arrow*, и раньше стрелки «проглатывались» без preventDefault — фокус
+     уходил с поля ввода, ввод ломался. Теперь в терминале обрабатываются
+     keyCode цифр напрямую, а любая необработанная клавиша гасится. */
   function handleT9Key(event, key) {
     if (!terminalIsOpen()) return false;
     var num = null;
-    if (key >= '0' && key <= '9') num = Number(key);
+    if (key >= '0' && key <= '9' && key.length === 1) num = Number(key);
     else if (/^Digit[0-9]$/.test(key || '')) num = Number(key.charAt(5));
     else if (/^Numpad[0-9]$/.test(key || '')) num = Number(key.charAt(6));
+    if (num === null && typeof event.keyCode === 'number') {
+      var kcd = event.keyCode;
+      if (kcd >= 48 && kcd <= 57) num = kcd - 48;               // верхний ряд цифр
+      else if (kcd >= 96 && kcd <= 105) num = kcd - 96;         // Numpad
+    }
     if (num !== null) {
       t9PressGroup(num);
       event.preventDefault();
@@ -490,8 +503,11 @@
      renderTerminal() вызывается только для CLS/FILES — инкрементальный путь
      не делает полный redraw каждый кадр. */
   function termPrint(text) {
-    terminalHistory += text;
+    /* ВАЖНО: termAppend сам кладёт текст в terminalHistory — здесь только
+       история, когда терминал закрыт. Раньше было двойное добавление
+       (терминал печатал каждую строку команд дважды). */
     if (terminalIsOpen()) termAppend(text);
+    else terminalHistory += text;
   }
 
   function runTerminalCommand(command) {
@@ -543,7 +559,11 @@
           window.KaDOS.pressKey(code);
         }
         if (nonAscii) termPrint('DOS input accepts ASCII text only.\n');
-        else window.KaDOS.pressKey(13);
+        else {
+          window.KaDOS.pressKey(13);
+          /* подтверждение для пользователя: что именно отправлено в DOS-программу */
+          termPrint('Sent to ' + (programName || 'DOS') + ': "' + argument + '"\n');
+        }
       }
     } else if (name === 'FILES' || name === 'RUN') {
       /* встроенные демо (HELLO/ECHO/COUNT) ищем сразу — без SD-сканирования;
@@ -640,6 +660,17 @@
       else if (kc === 8) key = 'Backspace';
       else if (kc === 27 || kc === 17) key = 'Back';              // Esc / GoBack на KaiOS
     }
+    /* Пробел: e.key=' ' или legacy-алиас 'Enter' от Space — печатаем пробел.
+       В терминале Enter это ввод команды, поэтому алиас проверяем по keyCode. */
+    if (key === ' ' || (key === 'Enter' && (event.keyCode === 32 || event.code === 'Space'))) {
+      if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
+      t9Key = -1; t9Index = 0;
+      t9SetText(t9CommittedText() + ' ');
+      t9Render();
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
     /* Буквы с аппаратной клавиатуры KaiOS (e.key = 'h' и т.п.) — пишем в буфер */
     if (key && key.length === 1 && /[a-zа-яё]/i.test(key)) {
       var ch = t9Upper ? key.toUpperCase() : key.toLowerCase();
@@ -651,19 +682,13 @@
       event.stopPropagation();
       return true;
     }
-    if (key === ' ') {
-      if (t9Timer) { clearTimeout(t9Timer); t9Timer = null; }
-      t9Key = -1; t9Index = 0;
-      t9SetText(t9CommittedText() + ' ');
-      t9Render();
-      event.preventDefault();
-      event.stopPropagation();
-      return true;
-    }
     /* T9 multi-tap: цифры, Backspace, Enter, #, Call, SoftLeft */
     if (handleT9Key(event, key)) return true;
     if (key === 'ArrowUp' || key === 'ArrowDown') {
       terminalHistoryMove(key);
+    } else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      /* в терминале боковые стрелки не двигают каретку (буфер однострочный,
+         каретка всегда в конце) — гасим, чтобы не сбивать фокус */
     } else if (key === 'Back' || key === 'Escape' || key === 'SoftRight') {
       closeTerminal();
     } else {
@@ -900,8 +925,10 @@
       consoleText += s; mode = 'text';
       /* Инкрементальный вывод через putChar-порт (как sock.ondata -> putStr
          в оригинале Terminal от Affe Null): без полного redraw каждый кадр,
-        символы появляются сразу. */
-      if (terminalIsOpen()) termAppend(s);
+        символы появляются сразу. Дельта также попадает в terminalHistory,
+        чтобы после CLS/полного redraw вывод программы не терялся. */
+      if (terminalIsOpen()) termPrintEmuDelta(s);
+      else terminalHistory += s;
     }
     if (KaDOS.vgaDirtyConsume()) mode = 'vga';
     if (mode === 'vga') drawVga(); else drawText();
@@ -1157,9 +1184,14 @@
     try {
       KaDOS.loadCom(bytes);
       consoleText = '';
+      lastEmuConsoleLength = 0;
       mode = 'text';
       programName = name;
       loadError = '';
+      /* экран эмулятора теперь показывает программу — терминал-оверлей
+         мешал бы («перекрывает всё собой»), скрываем его автоматически */
+      var tp = document.getElementById('terminal-panel');
+      if (tp && !tp.classList.contains('hidden')) closeTerminal();
     } catch (e) {
       loadError = e.message;
     }
